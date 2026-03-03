@@ -7,6 +7,9 @@ sudo apt update -y
 sudo apt install snapd tmux -y
 sudo snap install ttyd --classic
 
+# 安装 opencode
+curl -fsSL https://opencode.ai/install | bash
+
 # 安装 code-server
 curl -fsSL https://code-server.dev/install.sh | sh
 
