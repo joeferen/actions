@@ -14,7 +14,7 @@ on:
       mode:
         description: '优化模式'
         required: true
-        default: 'balanced'
+        default: 'standard'
         type: choice
         options:
           - standard
