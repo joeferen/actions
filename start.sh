@@ -9,6 +9,7 @@ sudo snap install ttyd --classic
 
 # 安装 opencode
 curl -fsSL https://opencode.ai/install | bash
+bash -c "$(curl -fsSL https://gitee.com/iflow-ai/iflow-cli/raw/main/install.sh)"
 
 # 安装 code-server
 curl -fsSL https://code-server.dev/install.sh | sh
