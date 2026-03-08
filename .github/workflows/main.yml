@@ -280,16 +280,14 @@ jobs:
           echo ""
           
           START_TIME=$(date +%s)
-          END_TIME=$((START_TIME + DURATION_SECONDS))
           ITERATION=0
           
           while true; do
             ITERATION=$((ITERATION + 1))
             CURRENT_TIME=$(date +%s)
             ELAPSED=$((CURRENT_TIME - START_TIME))
-            REMAINING=$((END_TIME - CURRENT_TIME))
             
-            if [ $REMAINING -le 0 ]; then
+            if [ $ELAPSED -ge $DURATION_SECONDS ]; then
               echo "============================================="
               echo "⏰ 已达到设置的运行时长"
               echo "============================================="
@@ -301,8 +299,6 @@ jobs:
             ELAPSED_HOURS=$((ELAPSED / 3600))
             ELAPSED_MINS=$(((ELAPSED % 3600) / 60))
             ELAPSED_SECS=$((ELAPSED % 60))
-            REMAINING_MINS=$((REMAINING / 60))
-            REMAINING_SECS=$((REMAINING % 60))
             
             DISK_USED=$(df -h / | tail -1 | awk '{print $3}')
             DISK_AVAIL=$(df -h / | tail -1 | awk '{print $4}')
@@ -314,7 +310,6 @@ jobs:
             echo "📊 状态报告 #${ITERATION}"
             echo "============================================="
             echo "⏰ 已运行: ${ELAPSED_HOURS}小时 ${ELAPSED_MINS}分 ${ELAPSED_SECS}秒"
-            echo "⏳ 剩余时间: ${REMAINING_MINS}分 ${REMAINING_SECS}秒"
             echo "📅 当前时间: $(date '+%Y-%m-%d %H:%M:%S')"
             echo ""
             echo "💾 磁盘使用: 已用 ${DISK_USED} | 可用 ${DISK_AVAIL} | 使用率 ${DISK_PERCENT}"
