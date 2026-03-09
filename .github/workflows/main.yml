@@ -23,7 +23,7 @@ on:
       duration:
         description: '保活时长（分钟）'
         required: true
-        default: '3570'
+        default: '330'
         type: string
 
 jobs:
