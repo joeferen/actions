@@ -40,7 +40,6 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install curl_cffi
-          pip install sentinel_pow || echo "sentinel_pow not installed, using empty PoW"
       
       - name: Run codex maintenance (V3)
         env:
