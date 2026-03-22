@@ -108,28 +108,74 @@ _FAMILY_NAMES = [
     "Russell", "Sullivan", "Bell", "Coleman", "Butler", "Henderson", "Barnes",
 ]
 
-# 浏览器指纹列表 (来自 codex_register.py)
-_BROWSER_PROFILES = [
-    'edge99', 'edge101', 'chrome99', 'chrome100', 'chrome101', 'chrome104',
-    'chrome107', 'chrome110', 'chrome116', 'chrome119', 'chrome120', 'chrome123',
-    'chrome124', 'chrome131', 'chrome133a', 'chrome136', 'chrome142',
-    'safari153', 'safari155', 'safari170', 'safari180', 'safari184',
-    'safari260', 'safari2601', 'firefox133', 'firefox135', 'firefox144',
-    'safari15_3', 'safari15_5', 'safari17_0', 'safari17_2_ios', 'safari18_0',
+# 浏览器指纹列表 - curl_cffi 支持的版本（按浏览器分组）
+_BROWSER_PROFILES_CHROME = [
+    'chrome99', 'chrome100', 'chrome101', 'chrome104', 'chrome107',
+    'chrome110', 'chrome116', 'chrome119', 'chrome120', 'chrome123',
+    'chrome124', 'chrome126', 'chrome127', 'chrome131', 'chrome133a',
+    'chrome136', 'chrome140', 'chrome142', 'chrome146',
 ]
 
-_ACCEPT_LANGUAGES = [
-    "en-US,en;q=0.9",
-    "en-GB,en;q=0.9,en-US;q=0.8",
-    "en,en-US;q=0.9,en-GB;q=0.8",
-    "zh-CN,zh;q=0.9",
-    "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
-    "es-ES,es;q=0.9,en;q=0.8",
-    "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-    "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-    "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+_BROWSER_PROFILES_EDGE = ['edge99', 'edge101', 'edge131']
+
+_BROWSER_PROFILES_SAFARI = [
+    'safari15_3', 'safari15_5', 'safari17_0', 'safari17_2_ios', 'safari18_0',
+    'safari153', 'safari155', 'safari170', 'safari180', 'safari184',
+    'safari260', 'safari2601',
 ]
+
+_BROWSER_PROFILES_FIREFOX = ['firefox133', 'firefox135', 'firefox144']
+
+# 所有的浏览器指纹组合
+_BROWSER_PROFILES = (
+    _BROWSER_PROFILES_CHROME +
+    _BROWSER_PROFILES_EDGE +
+    _BROWSER_PROFILES_SAFARI +
+    _BROWSER_PROFILES_FIREFOX
+)
+
+# 语言-地区组合，用于动态生成 Accept-Language
+_LANG_CODES = ['en', 'zh', 'es', 'fr', 'de', 'ja', 'ko', 'pt', 'it', 'ru', 'nl', 'pl']
+_REGION_CODES = ['US', 'GB', 'CN', 'TW', 'ES', 'MX', 'FR', 'DE', 'JP', 'KR', 'BR', 'IT', 'RU', 'NL', 'PL']
+
+
+def _generate_accept_language() -> str:
+    """动态生成随机但合理的 Accept-Language 头"""
+    # 随机选择主要语言
+    primary_lang = random.choice(_LANG_CODES)
+    primary_region = random.choice(_REGION_CODES)
+    
+    # 生成主语言标签
+    if primary_lang in ['en', 'zh', 'es', 'pt']:
+        main_tag = f"{primary_lang}-{primary_region}"
+    else:
+        main_tag = f"{primary_lang}-{primary_region}"
+    
+    # 随机决定是否添加次要语言
+    parts = [f"{main_tag},*;q=0.9" if random.random() < 0.3 else main_tag]
+    
+    # 添加英文作为备选（非英文主语言时）
+    if primary_lang != 'en' and random.random() < 0.8:
+        en_variant = random.choice(['en-US', 'en-GB', 'en'])
+        parts.append(f"{en_variant};q=0.8")
+    
+    # 添加原生语言标签
+    if random.random() < 0.5:
+        parts.append(f"{primary_lang};q=0.9")
+    
+    # 随机添加其他语言
+    if random.random() < 0.4:
+        other_lang = random.choice([l for l in _LANG_CODES if l != primary_lang])
+        parts.append(f"{other_lang};q=0.7")
+    
+    # 构建最终的 Accept-Language 字符串
+    if len(parts) == 1:
+        # 单语言，可能加上质量因子
+        if random.random() < 0.3:
+            return f"{parts[0]},*;q=0.5"
+        return parts[0]
+    else:
+        return ",".join(parts)
 
 
 def random_name() -> str:
@@ -146,9 +192,9 @@ def random_birthday() -> str:
 
 
 def pick_browser_profile() -> tuple:
-    """随机选择浏览器指纹"""
+    """随机选择浏览器指纹，动态生成 Accept-Language"""
     profile = random.choice(_BROWSER_PROFILES)
-    lang = random.choice(_ACCEPT_LANGUAGES)
+    lang = _generate_accept_language()
     return profile, lang
 
 
