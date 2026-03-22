@@ -1,724 +1,1286 @@
-/**
- * Node.js 脚本：检测 codex 提供商账号的 401 状态并删除失效账号
- * 
- * 使用方法：
- *   node codex_maintenance.js <min_accounts> [quota_threshold_percent] [base_url] [token] [domain_index] [register_timeout] [register_script] [concurrency]
- * 
- * 参数：
- *   min_accounts     - 账号数量阈值，低于此值会上传 token*.json 文件并注册新账号
- *   quota_threshold_percent - 额度不足删除阈值（剩余额度百分比 < 该值则删除；可选，默认 20）
- *   base_url         - 服务地址（可选，有默认值）
- *   token            - 认证令牌（可选，有默认值）
- *   domain_index     - 邮箱域名索引（默认 0）
- *   register_timeout - 注册循环总时长限制（秒），超时后停止注册
- *   register_script  - 注册脚本名称（如 openai_register_v2.py）
- *   concurrency      - 并发数，默认 50
- */
+"""
+OpenAI 自动注册脚本 V3 - 优化版
+基于 V2，整合 codex_register.py 的关键功能：
+1. 真实 Sentinel PoW 计算
+2. 新注册后重新登录获取 token
+3. 随机姓名/生日生成
+4. 已注册账号识别处理
+5. OTP 定时重发策略
+"""
+import json
+import os
+import re
+import sys
+import time
+import random
+import secrets
+import hashlib
+import base64
+import argparse
+import threading
+import logging
+from datetime import datetime
+from urllib.parse import urlencode, urlparse, parse_qs, urljoin
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, List, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-const https = require('https');
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const { spawn } = require('child_process');
+from curl_cffi import requests
 
-// 默认配置
-const DEFAULT_MIN_ACCOUNTS = 100;
-const DEFAULT_DOMAIN_INDEX = 0;
-const DEFAULT_REGISTER_TIMEOUT = 1800; // 注册循环总时长限制（秒）
-const DEFAULT_REGISTER_SCRIPT = 'openai_register_v2.py';
-const DEFAULT_BASE_URL = '';
-const DEFAULT_TOKEN = '';
-const DEFAULT_CONCURRENCY = 50;
-const NOTIFY_BASE_URL = 'https://api.day.app/xxxxxxxx';
+# 尝试导入 sentinel_pow 模块
+try:
+    from sentinel_pow import build_sentinel_pow_token, SentinelPOWError
+    HAS_SENTINEL_POW = True
+except ImportError:
+    HAS_SENTINEL_POW = False
+    print("[Warn] sentinel_pow 模块未安装，将使用空 PoW")
 
-// 额度不足删除阈值（剩余额度百分比 < 该值则删除）
-const DEFAULT_QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT = 20;
-const FINAL_ACCOUNT_NOTIFY_THRESHOLD_RATIO = 0.9;
+# ==========================================
+# 日志配置
+# ==========================================
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(SCRIPT_DIR, "openai_register_v3.log")
 
-// 解析命令行参数
-const args = process.argv.slice(2);
+def _setup_logger():
+    logger = logging.getLogger("reg_v3")
+    logger.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
 
-const MIN_ACCOUNTS = parseInt(args[0]) || DEFAULT_MIN_ACCOUNTS;
+log = _setup_logger()
 
-const QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT = (args[1] !== undefined && args[1] !== null && String(args[1]).trim() !== '')
-    ? Math.max(0, Math.min(100, parseFloat(String(args[1]).trim().replace(/%$/, ''))))
-    : DEFAULT_QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT;
+# ==========================================
+# 配置
+# ==========================================
 
-// BASE_URL 和 TOKEN 优先从环境变量读取
-const BASE_URL = normalizeUrl(args[2] || process.env.BASE_URL || DEFAULT_BASE_URL);
-const TOKEN = args[3] || process.env.TOKEN || DEFAULT_TOKEN;
-const DOMAIN_INDEX = parseInt(args[4]) || DEFAULT_DOMAIN_INDEX;
-const REGISTER_TIMEOUT = parseInt(args[5]) * 1000 || DEFAULT_REGISTER_TIMEOUT * 1000;
-const REGISTER_SCRIPT = args[6] || DEFAULT_REGISTER_SCRIPT;
-const CONCURRENCY = parseInt(args[7]) || DEFAULT_CONCURRENCY;
+MAILFREE_BASE = "https://mailfree.smanx.xx.kg"
+JWT_TOKEN = "auto"
+DEFAULT_DOMAIN_INDEX = 0
 
-// 标准化 URL
-function normalizeUrl(url) {
-    let s = (url || '').trim()
-        .replace(/：/g, ':')
-        .replace(/／/g, '/')
-        .replace(/。/g, '.')
-        .replace(/，/g, ',')
-        .replace(/；/g, ';')
-        .replace(/　/g, ' ')
-        .trim();
-    if (s.endsWith('/')) s = s.slice(0, -1);
-    return s;
-}
+AUTH_URL = "https://auth.openai.com/oauth/authorize"
+TOKEN_URL = "https://auth.openai.com/oauth/token"
+SENTINEL_URL = "https://sentinel.openai.com/backend-api/sentinel/req"
+CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
-// 通用 HTTP 请求封装
-function httpRequest(path, options = {}) {
-    return new Promise((resolve, reject) => {
-        const url = BASE_URL + path;
-        const parsedUrl = new URL(url);
-        
-        const requestOptions = {
-            hostname: parsedUrl.hostname,
-            port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-            path: parsedUrl.pathname + parsedUrl.search,
-            method: options.method || 'GET',
-            headers: {
-                'Authorization': `Bearer ${TOKEN}`,
-                'Accept': 'application/json',
-                'Content-Type': 'application/json',
-                ...(options.headers || {})
-            }
-        };
+DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
+DEFAULT_SCOPE = "openid email profile offline_access"
 
-        const client = parsedUrl.protocol === 'https:' ? https : http;
-        
-        const req = client.request(requestOptions, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                if (res.statusCode >= 200 && res.statusCode < 300) {
-                    try {
-                        resolve(JSON.parse(data));
-                    } catch (e) {
-                        resolve(data);
-                    }
-                } else {
-                    reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
-                }
-            });
-        });
+ACCOUNTS_FILE = os.path.join(SCRIPT_DIR, "email_accounts_v3.txt")
+TOKENS_DIR = SCRIPT_DIR  # 保存到当前目录，兼容 codex_maintenance.js
 
-        req.on('error', reject);
-        
-        if (options.body) {
-            req.write(options.body);
-        }
-        req.end();
-    });
-}
+# 超时与重试配置
+MAIL_POLL_TIMEOUT = 180
+OTP_RESEND_INTERVAL = 25
+MAX_RETRY_PER_ACCOUNT = 3
 
-// 发送通知提醒
-function sendNotification(title, content) {
-    return new Promise((resolve, reject) => {
-        const safeTitle = encodeURIComponent(title);
-        const safeContent = encodeURIComponent(content);
-        const url = `${NOTIFY_BASE_URL}/${safeTitle}/${safeContent}`;
-        const parsedUrl = new URL(url);
+# ==========================================
+# 随机姓名/生日数据 (来自 codex_register.py)
+# ==========================================
+_GIVEN_NAMES = [
+    "Liam", "Noah", "Oliver", "James", "Elijah", "William", "Henry", "Lucas",
+    "Benjamin", "Theodore", "Jack", "Levi", "Alexander", "Mason", "Ethan",
+    "Daniel", "Jacob", "Michael", "Logan", "Jackson", "Sebastian", "Aiden",
+    "Owen", "Samuel", "Ryan", "Nathan", "Carter", "Luke", "Jayden", "Dylan",
+    "Caleb", "Isaac", "Connor", "Adrian", "Hunter", "Eli", "Thomas", "Aaron",
+    "Olivia", "Emma", "Charlotte", "Amelia", "Sophia", "Isabella", "Mia",
+    "Evelyn", "Harper", "Luna", "Camila", "Sofia", "Scarlett", "Elizabeth",
+    "Eleanor", "Emily", "Chloe", "Mila", "Avery", "Riley", "Aria", "Layla",
+    "Nora", "Lily", "Hannah", "Hazel", "Zoey", "Stella", "Aurora", "Natalie",
+    "Emilia", "Zoe", "Lucy", "Lillian", "Addison", "Willow", "Ivy", "Violet",
+]
 
-        const requestOptions = {
-            hostname: parsedUrl.hostname,
-            port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-            path: parsedUrl.pathname + parsedUrl.search,
-            method: 'GET'
-        };
+_FAMILY_NAMES = [
+    "Smith", "Johnson", "Williams", "Brown", "Jones", "Miller", "Davis",
+    "Wilson", "Anderson", "Thomas", "Taylor", "Moore", "Jackson", "Martin",
+    "Lee", "Thompson", "White", "Harris", "Clark", "Lewis", "Robinson",
+    "Walker", "Young", "Allen", "King", "Wright", "Hill", "Scott", "Green",
+    "Adams", "Baker", "Nelson", "Carter", "Mitchell", "Roberts", "Turner",
+    "Phillips", "Campbell", "Parker", "Evans", "Edwards", "Collins", "Stewart",
+    "Morris", "Murphy", "Cook", "Rogers", "Morgan", "Cooper", "Peterson",
+    "Reed", "Bailey", "Kelly", "Howard", "Ward", "Watson", "Brooks", "Bennett",
+    "Gray", "Price", "Hughes", "Sanders", "Long", "Foster", "Powell", "Perry",
+    "Russell", "Sullivan", "Bell", "Coleman", "Butler", "Henderson", "Barnes",
+]
 
-        const client = parsedUrl.protocol === 'https:' ? https : http;
+# 浏览器指纹列表 (来自 codex_register.py)
+_BROWSER_PROFILES = [
+    'edge99', 'edge101', 'chrome99', 'chrome100', 'chrome101', 'chrome104',
+    'chrome107', 'chrome110', 'chrome116', 'chrome119', 'chrome120', 'chrome123',
+    'chrome124', 'chrome131', 'chrome133a', 'chrome136', 'chrome142',
+    'safari153', 'safari155', 'safari170', 'safari180', 'safari184',
+    'safari260', 'safari2601', 'firefox133', 'firefox135', 'firefox144',
+    'safari15_3', 'safari15_5', 'safari17_0', 'safari17_2_ios', 'safari18_0',
+]
 
-        const req = client.request(requestOptions, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                if (res.statusCode >= 200 && res.statusCode < 300) {
-                    resolve(data);
-                } else {
-                    reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
-                }
-            });
-        });
+_ACCEPT_LANGUAGES = [
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.9,en-US;q=0.8",
+    "en,en-US;q=0.9,en-GB;q=0.8",
+    "zh-CN,zh;q=0.9",
+    "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+    "es-ES,es;q=0.9,en;q=0.8",
+    "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+    "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+]
 
-        req.on('error', reject);
-        req.end();
-    });
-}
 
-// 获取账号列表
-async function getAccounts() {
-    const data = await httpRequest('/v0/management/auth-files');
-    return data.files || [];
-}
+def random_name() -> str:
+    """生成随机英文姓名"""
+    return f"{random.choice(_GIVEN_NAMES)} {random.choice(_FAMILY_NAMES)}"
 
-// 解析百分比（参考 index.html）
-function parsePercent(v) {
-    if (v === null || v === undefined) return null;
-    if (typeof v === 'number') return v;
-    try {
-        const s = String(v).trim().replace(/%$/, '');
-        return s === '' ? null : parseFloat(s);
-    } catch {
-        return null;
-    }
-}
 
-// 检测单个账号：401 + 额度（参考 index.html 的 wham/usage 解析逻辑）
-async function checkAccount(item) {
-    const authIndex = item.auth_index;
-    const name = item.name || item.id;
-    const chatgptAccountId = item.chatgpt_account_id || item.chatgptAccountId || item.account_id || item.accountId;
+def random_birthday() -> str:
+    """生成随机生日（18~40岁之间）"""
+    y = random.randint(1986, 2006)
+    m = random.randint(1, 12)
+    d = random.randint(1, 28)
+    return f"{y}-{m:02d}-{d:02d}"
 
-    if (!authIndex) {
-        return { name, error: 'missing auth_index', invalid_401: false, low_quota: false };
+
+def pick_browser_profile() -> tuple:
+    """随机选择浏览器指纹"""
+    profile = random.choice(_BROWSER_PROFILES)
+    lang = random.choice(_ACCEPT_LANGUAGES)
+    return profile, lang
+
+
+# ==========================================
+# MailFree 邮箱 API
+# ==========================================
+
+
+def _mailfree_headers() -> Dict[str, Any]:
+    """构建请求头"""
+    return {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-Admin-Token": JWT_TOKEN,
     }
 
-    try {
-        const payload = {
-            authIndex: authIndex,
-            method: 'GET',
-            url: 'https://chatgpt.com/backend-api/wham/usage',
-            header: {
-                'Authorization': 'Bearer $TOKEN$',
-                'Content-Type': 'application/json',
-                'User-Agent': 'codex_cli_rs/0.76.0',
-                ...(chatgptAccountId ? { 'Chatgpt-Account-Id': chatgptAccountId } : {})
-            }
-        };
 
-        const data = await httpRequest('/v0/management/api-call', {
-            method: 'POST',
-            body: JSON.stringify(payload)
-        });
+def get_domains(proxies: Any = None) -> List[str]:
+    """获取可用域名列表"""
+    resp = requests.get(
+        f"{MAILFREE_BASE}/api/domains",
+        headers=_mailfree_headers(),
+        proxies=proxies,
+        impersonate="chrome",
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"获取域名失败，状态码: {resp.status_code}")
+    return resp.json()
 
-        const is401 = data.status_code === 401;
 
-        let used_percent = null;
-        let remaining_percent = null;
-        let quota_source = null;
-        let primary_used_percent = null;
-        let primary_reset_at = null;
-        let individual_used_percent = null;
-        let individual_reset_at = null;
+def create_email(local: str, domain_index: int = 0, proxies: Any = None) -> Dict[str, Any]:
+    """创建自定义邮箱"""
+    resp = requests.post(
+        f"{MAILFREE_BASE}/api/create",
+        headers=_mailfree_headers(),
+        json={"local": local, "domainIndex": domain_index},
+        proxies=proxies,
+        impersonate="chrome",
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"创建邮箱失败: {resp.status_code}: {resp.text}")
+    return resp.json()
 
-        if (data.status_code === 200) {
-            let usageData = {};
-            try {
-                usageData = typeof data.body === 'string' ? JSON.parse(data.body) : (data.body || {});
-            } catch {
-                usageData = {};
-            }
 
-            const rateLimit = usageData.rate_limit || usageData.rateLimit || {};
+def get_emails(mailbox: str, limit: int = 20, proxies: Any = None) -> List[Dict[str, Any]]:
+    """获取邮件列表"""
+    resp = requests.get(
+        f"{MAILFREE_BASE}/api/emails",
+        headers=_mailfree_headers(),
+        params={"mailbox": mailbox, "limit": limit},
+        proxies=proxies,
+        impersonate="chrome",
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        return []
+    return resp.json()
 
-            const windows = [];
-            ['primary_window', 'secondary_window', 'individual_window', 'primaryWindow', 'secondaryWindow', 'individualWindow'].forEach(key => {
-                const win = rateLimit[key];
-                if (win && typeof win === 'object') {
-                    windows.push({
-                        name: key,
-                        used_percent: parsePercent(win.used_percent ?? win.usedPercent ?? win.used_percentage),
-                        reset_at: win.reset_at ?? win.resetAt,
-                        limit_window_seconds: win.limit_window_seconds ?? win.limitWindowSeconds ?? win.window_seconds ?? win.windowSeconds,
-                        remaining: win.remaining,
-                        limit_reached: win.limit_reached ?? win.limitReached
-                    });
-                }
-            });
 
-            let weeklyWindow = windows.find(w => String(w.name || '').toLowerCase().includes('individual'));
-            let shortWindow = windows.find(w => String(w.name || '').toLowerCase().includes('secondary'));
+def get_email_detail(email_id: int, proxies: Any = None) -> Dict[str, Any]:
+    """获取邮件详情"""
+    resp = requests.get(
+        f"{MAILFREE_BASE}/api/email/{email_id}",
+        headers=_mailfree_headers(),
+        proxies=proxies,
+        impersonate="chrome",
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        return {}
+    return resp.json()
 
-            // 按窗口时长兜底选择
-            const withSeconds = windows.filter(w => w.limit_window_seconds);
-            if (!weeklyWindow && withSeconds.length) {
-                weeklyWindow = withSeconds.reduce((a, b) => a.limit_window_seconds > b.limit_window_seconds ? a : b);
-            }
-            if (!shortWindow && withSeconds.length) {
-                const sorted = [...withSeconds].sort((a, b) => a.limit_window_seconds - b.limit_window_seconds);
-                shortWindow = sorted.find(w => w !== weeklyWindow) || sorted[0];
-            }
 
-            if (weeklyWindow) {
-                individual_used_percent = weeklyWindow.used_percent;
-                individual_reset_at = weeklyWindow.reset_at;
-            }
-            if (shortWindow) {
-                primary_used_percent = shortWindow.used_percent;
-                primary_reset_at = shortWindow.reset_at;
-            }
+def delete_mailbox(address: str, proxies: Any = None) -> bool:
+    """删除邮箱"""
+    resp = requests.delete(
+        f"{MAILFREE_BASE}/api/mailboxes",
+        headers=_mailfree_headers(),
+        params={"address": address},
+        proxies=proxies,
+        impersonate="chrome",
+        timeout=15,
+    )
+    return resp.status_code == 200
 
-            // 优先用周窗口（individual），否则用短窗口
-            if (weeklyWindow && weeklyWindow.used_percent !== null && weeklyWindow.used_percent !== undefined) {
-                used_percent = weeklyWindow.used_percent;
-                quota_source = 'weekly';
-            } else if (shortWindow && shortWindow.used_percent !== null && shortWindow.used_percent !== undefined) {
-                used_percent = shortWindow.used_percent;
-                quota_source = 'short';
-            }
 
-            if (used_percent !== null && used_percent !== undefined && !Number.isNaN(Number(used_percent))) {
-                remaining_percent = 100 - Number(used_percent);
-            }
-        }
+def reset_mailbox_password(address: str, new_password: str, proxies: Any = None) -> bool:
+    """设置邮箱密码"""
+    resp = requests.post(
+        f"{MAILFREE_BASE}/api/mailboxes/change-password",
+        headers=_mailfree_headers(),
+        json={"address": address, "new_password": new_password},
+        proxies=proxies,
+        impersonate="chrome",
+        timeout=15,
+    )
+    return resp.status_code == 200
 
-        const lowQuota = (remaining_percent !== null && remaining_percent < QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT);
-        return {
-            name,
-            status_code: data.status_code,
-            invalid_401: is401,
-            low_quota: lowQuota,
-            used_percent,
-            remaining_percent,
-            quota_source,
-            primary_used_percent,
-            primary_reset_at,
-            individual_used_percent,
-            individual_reset_at,
-            error: null
-        };
-    } catch (e) {
-        return { name, error: e.message, invalid_401: false, low_quota: false };
+
+# ==========================================
+# 验证码轮询 (优化版：支持重发)
+# ==========================================
+
+
+def poll_verification_code(
+    email: str,
+    proxies: Any = None,
+    timeout: int = MAIL_POLL_TIMEOUT,
+    used_codes: Optional[set] = None,
+    resend_fn: Optional[Callable] = None,
+    otp_sent_at: Optional[float] = None,
+) -> str:
+    """轮询获取 OpenAI 6 位验证码，支持定时重发"""
+    regex = r"(?<!\d)(\d{6})(?!\d)"
+    used = used_codes or set()
+    seen_ids: set = set()
+    start = time.time()
+    last_resend = 0.0
+    intervals = [3, 4, 5, 6, 8, 10]
+    idx = 0
+
+    log.info(f"    📧 等待验证码 ({email})...")
+
+    while time.time() - start < timeout:
+        try:
+            resp = requests.get(
+                f"{MAILFREE_BASE}/api/emails",
+                headers=_mailfree_headers(),
+                params={"mailbox": email, "limit": 10},
+                proxies=proxies,
+                impersonate="chrome",
+                timeout=15,
+            )
+
+            if resp.status_code == 200:
+                emails_data = resp.json()
+                if isinstance(emails_data, list):
+                    for mail in emails_data:
+                        msg_id = mail.get("id")
+                        if not msg_id or msg_id in seen_ids:
+                            continue
+                        seen_ids.add(msg_id)
+
+                        sender = str(mail.get("sender") or "").lower()
+                        subject = str(mail.get("subject") or "")
+                        preview = str(mail.get("preview") or "")
+                        verification_code = mail.get("verification_code")
+
+                        # 检查是否来自 OpenAI
+                        if "openai" not in sender and "openai" not in subject.lower():
+                            # 获取详情进一步检查
+                            detail = get_email_detail(msg_id, proxies)
+                            content = "\n".join([
+                                subject, preview,
+                                str(detail.get("content") or ""),
+                                str(detail.get("html_content") or ""),
+                            ])
+                            if "openai" not in content.lower():
+                                continue
+                            m = re.search(regex, content)
+                        else:
+                            if verification_code:
+                                m = re.match(regex, str(verification_code))
+                            else:
+                                m = re.search(regex, preview)
+
+                        if m:
+                            code = m.group(1)
+                            if code not in used:
+                                used.add(code)
+                                elapsed = int(time.time() - start)
+                                log.info(f"    ✅ 验证码: {code} (耗时 {elapsed}s)")
+                                return code
+
+        except Exception as e:
+            log.warning(f"    MailAPI 查询失败: {e}")
+
+        # 定时重发 OTP
+        elapsed_now = time.time() - start
+        if resend_fn and elapsed_now > 20 and (elapsed_now - last_resend) > OTP_RESEND_INTERVAL:
+            try:
+                resend_fn()
+                last_resend = elapsed_now
+                log.info("    🔄 已重发 OTP")
+            except Exception:
+                pass
+
+        wait = intervals[min(idx, len(intervals) - 1)]
+        idx += 1
+        time.sleep(wait)
+
+    raise TimeoutError(f"验证码超时 ({timeout}s)")
+
+
+# ==========================================
+# OAuth 工具
+# ==========================================
+
+
+def _b64url_no_pad(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _sha256_b64url_no_pad(s: str) -> str:
+    return _b64url_no_pad(hashlib.sha256(s.encode("ascii")).digest())
+
+
+def _random_state(nbytes: int = 16) -> str:
+    return secrets.token_urlsafe(nbytes)
+
+
+def _pkce_verifier() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def _decode_jwt_segment(seg: str) -> Dict[str, Any]:
+    raw = (seg or "").strip()
+    if not raw:
+        return {}
+    pad = "=" * ((4 - (len(raw) % 4)) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode((raw + pad).encode("ascii"))
+        return json.loads(decoded.decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _jwt_claims_no_verify(id_token: str) -> Dict[str, Any]:
+    if not id_token or id_token.count(".") < 2:
+        return {}
+    payload_b64 = id_token.split(".")[1]
+    return _decode_jwt_segment(payload_b64)
+
+
+def _to_int(v: Any) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _generate_password(length: int = 16) -> str:
+    """生成符合 OpenAI 要求的随机强密码"""
+    import string
+    upper = random.choices(string.ascii_uppercase, k=2)
+    lower = random.choices(string.ascii_lowercase, k=2)
+    digits = random.choices(string.digits, k=2)
+    specials = random.choices("!@#$%&*", k=2)
+    rest_len = length - 8
+    pool = string.ascii_letters + string.digits + "!@#$%&*"
+    rest = random.choices(pool, k=rest_len)
+    chars = upper + lower + digits + specials + rest
+    random.shuffle(chars)
+    return "".join(chars)
+
+
+@dataclass(frozen=True)
+class OAuthStart:
+    auth_url: str
+    state: str
+    code_verifier: str
+    redirect_uri: str
+
+
+def generate_oauth_url(
+    *, redirect_uri: str = DEFAULT_REDIRECT_URI, scope: str = DEFAULT_SCOPE
+) -> OAuthStart:
+    state = _random_state()
+    code_verifier = _pkce_verifier()
+    code_challenge = _sha256_b64url_no_pad(code_verifier)
+
+    params = {
+        "client_id": CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "prompt": "login",
+        "id_token_add_organizations": "true",
+        "codex_cli_simplified_flow": "true",
     }
-}
+    auth_url = f"{AUTH_URL}?{urlencode(params)}"
+    return OAuthStart(
+        auth_url=auth_url,
+        state=state,
+        code_verifier=code_verifier,
+        redirect_uri=redirect_uri,
+    )
 
-// 删除账号
-async function deleteAccount(name) {
-    const encoded = encodeURIComponent(name);
-    await httpRequest(`/v0/management/auth-files?name=${encoded}`, {
-        method: 'DELETE'
-    });
-    return true;
-}
 
-// 扫描目录下的 token*.json 文件
-function scanTokenFiles() {
-    const dir = __dirname;
-    const files = fs.readdirSync(dir);
-    return files.filter(f => /^token.*\.json$/i.test(f)).map(f => path.join(dir, f));
-}
+def submit_callback_url(
+    *,
+    callback_url: str,
+    expected_state: str,
+    code_verifier: str,
+    redirect_uri: str = DEFAULT_REDIRECT_URI,
+) -> str:
+    """从回调 URL 兑换 token"""
+    # 解析回调 URL
+    parsed = urlparse(callback_url)
+    query = parse_qs(parsed.query)
+    
+    code = (query.get("code") or [""])[0]
+    returned_state = (query.get("state") or [""])[0]
+    error = (query.get("error") or [""])[0]
+    error_desc = (query.get("error_description") or [""])[0]
 
-// 快照 token 文件元信息，用于识别“新建或被覆盖”的文件
-function snapshotTokenFiles() {
-    const m = new Map();
-    const files = scanTokenFiles();
-    for (const filePath of files) {
-        try {
-            const st = fs.statSync(filePath);
-            const name = path.basename(filePath);
-            m.set(name, {
-                filePath,
-                mtimeMs: st.mtimeMs,
-                size: st.size
-            });
-        } catch {
-            // 忽略瞬时不存在/无权限等异常
-        }
+    if error:
+        raise RuntimeError(f"OAuth error: {error}: {error_desc}")
+    if not code:
+        raise ValueError("callback url missing ?code=")
+    if returned_state != expected_state:
+        raise ValueError("state mismatch")
+
+    # 兑换 token
+    token_data = urlencode({
+        "grant_type": "authorization_code",
+        "client_id": CLIENT_ID,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "code_verifier": code_verifier,
+    })
+    
+    resp = requests.post(
+        TOKEN_URL,
+        data=token_data,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        impersonate="chrome",
+        timeout=30,
+    )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"Token 兑换失败: {resp.status_code}: {resp.text}")
+
+    token_resp = resp.json()
+    access_token = (token_resp.get("access_token") or "").strip()
+    refresh_token = (token_resp.get("refresh_token") or "").strip()
+    id_token = (token_resp.get("id_token") or "").strip()
+    expires_in = _to_int(token_resp.get("expires_in"))
+
+    claims = _jwt_claims_no_verify(id_token)
+    email = str(claims.get("email") or "").strip()
+    auth_claims = claims.get("https://api.openai.com/auth") or {}
+    account_id = str(auth_claims.get("chatgpt_account_id") or "").strip()
+
+    now = int(time.time())
+    expired_rfc3339 = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + max(expires_in, 0))
+    )
+    now_rfc3339 = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+
+    config = {
+        "id_token": id_token,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "account_id": account_id,
+        "last_refresh": now_rfc3339,
+        "email": email,
+        "type": "codex",
+        "expired": expired_rfc3339,
     }
-    return m;
-}
 
-function diffTokenFiles(beforeSnap, afterSnap) {
-    const changed = [];
-    for (const [name, meta] of afterSnap.entries()) {
-        const prev = beforeSnap.get(name);
-        if (!prev) {
-            changed.push(meta.filePath);
-            continue;
-        }
-        if (prev.mtimeMs !== meta.mtimeMs || prev.size !== meta.size) {
-            changed.push(meta.filePath);
-        }
+    return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+
+
+# ==========================================
+# Sentinel PoW (功能 1)
+# ==========================================
+
+
+def build_sentinel_token(device_id: str, user_agent: str, flow: str = "authorize_continue") -> str:
+    """构建 Sentinel token，优先使用真实 PoW"""
+    if HAS_SENTINEL_POW:
+        try:
+            pow_token = build_sentinel_pow_token(user_agent)
+            log.info(f"      PoW token 已生成")
+            body = json.dumps({
+                "p": pow_token,
+                "id": device_id,
+                "flow": flow,
+            }, separators=(",", ":"))
+        except SentinelPOWError as e:
+            log.warning(f"PoW 求解失败，使用空 PoW: {e}")
+            body = f'{{"p":"","id":"{device_id}","flow":"{flow}"}}'
+    else:
+        body = f'{{"p":"","id":"{device_id}","flow":"{flow}"}}'
+
+    return body
+
+
+def get_sentinel_header(device_id: str, user_agent: str, flow: str = "authorize_continue", proxies: Any = None) -> str:
+    """获取完整的 Sentinel header"""
+    req_body = build_sentinel_token(device_id, user_agent, flow)
+    
+    resp = requests.post(
+        SENTINEL_URL,
+        data=req_body,
+        headers={
+            "Origin": "https://sentinel.openai.com",
+            "Referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
+            "Content-Type": "text/plain;charset=UTF-8",
+        },
+        proxies=proxies,
+        impersonate="chrome",
+        timeout=15,
+    )
+
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise RuntimeError(f"Sentinel 失败: {resp.status_code} {resp.text[:200]}")
+
+    token = resp.json()["token"]
+    header = json.dumps({
+        "p": "", "t": "", "c": token,
+        "id": device_id, "flow": flow,
+    })
+    return header
+
+
+# ==========================================
+# HTTP 会话类 (支持随机指纹)
+# ==========================================
+
+
+class RegSession:
+    """注册会话，支持随机浏览器指纹"""
+
+    def __init__(self, proxies: Any = None):
+        self.profile, self.lang = pick_browser_profile()
+        self.proxies = proxies
+        self._session = requests.Session(
+            proxies=proxies,
+            impersonate=self.profile,
+        )
+        self._session.headers.update({
+            "Accept-Language": self.lang,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        })
+        log.info(f"    🎭 浏览器指纹: {self.profile}")
+
+    def get(self, url: str, **kwargs) -> Any:
+        return self._session.get(url, timeout=30, **kwargs)
+
+    def post(self, url: str, **kwargs) -> Any:
+        return self._session.post(url, timeout=30, **kwargs)
+
+    def post_json(self, url: str, data: dict, headers: Optional[dict] = None) -> Any:
+        hdrs = {"Content-Type": "application/json", "Accept": "application/json"}
+        if headers:
+            hdrs.update(headers)
+        return self._session.post(url, data=json.dumps(data), headers=hdrs, timeout=30)
+
+    def get_cookie(self, name: str) -> Optional[str]:
+        return self._session.cookies.get(name)
+
+    def follow_redirects(self, url: str, max_hops: int = 12) -> Optional[str]:
+        """跟随重定向链，返回包含 code 的回调 URL"""
+        current = url
+        for _ in range(max_hops):
+            resp = self._session.get(current, allow_redirects=False, timeout=30)
+            location = resp.headers.get("Location")
+            if not location:
+                return None
+            if "code=" in location:
+                return location
+            current = urljoin(current, location)
+        return None
+
+    def close(self):
+        self._session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+# ==========================================
+# 核心注册逻辑
+# ==========================================
+
+
+def register_account(
+    email: str,
+    openai_password: str,
+    proxies: Any = None,
+    used_codes: Optional[set] = None,
+) -> dict:
+    """
+    核心注册逻辑
+    返回包含 token 信息的字典
+    """
+    codes = used_codes or set()
+
+    with RegSession(proxies) as s:
+        # --- 1. 发起 OAuth ---
+        oauth = generate_oauth_url()
+        log.info(f"  [1] 发起 OAuth...")
+        resp = s.get(oauth.auth_url)
+        log.info(f"      状态: {resp.status_code}")
+
+        device_id = s.get_cookie("oai-did") or ""
+        if device_id:
+            log.info(f"      设备ID: {device_id[:16]}...")
+
+        time.sleep(random.uniform(0.8, 2.0))
+
+        # --- 2. 获取 Sentinel (功能 1: 真实 PoW) ---
+        log.info(f"  [2] 求解 Sentinel PoW...")
+        ua = s._session.headers.get("User-Agent", "Mozilla/5.0")
+        sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
+        log.info(f"      Sentinel token OK")
+
+        time.sleep(random.uniform(0.5, 1.5))
+
+        # --- 3. 提交邮箱 ---
+        log.info(f"  [3] 提交邮箱: {email}")
+        signup_resp = s.post_json(
+            "https://auth.openai.com/api/accounts/authorize/continue",
+            {"username": {"value": email, "kind": "email"}, "screen_hint": "signup"},
+            headers={
+                "Referer": "https://auth.openai.com/create-account",
+                "openai-sentinel-token": sentinel,
+            },
+        )
+        if signup_resp.status_code < 200 or signup_resp.status_code >= 300:
+            raise RuntimeError(f"提交邮箱失败: {signup_resp.status_code} {signup_resp.text[:300]}")
+
+        # 解析响应判断账号状态 (功能 4: 已注册账号识别)
+        try:
+            step3_data = signup_resp.json()
+            page_type = step3_data.get("page", {}).get("type", "")
+        except Exception:
+            step3_data = {}
+            page_type = ""
+
+        log.info(f"      页面类型: {page_type}")
+
+        # 已注册账号判断
+        is_existing_account = (page_type == "email_otp_verification")
+
+        time.sleep(random.uniform(0.5, 1.5))
+
+        name = ""
+
+        if is_existing_account:
+            # 已注册账号：OTP 已自动发送
+            log.info(f"  [4] 检测到已注册账号，OTP 已自动发送")
+            otp_sent_at = time.time()
+        else:
+            # --- 4. 设置密码 ---
+            log.info(f"  [4] 设置密码...")
+            pwd_resp = s.post_json(
+                "https://auth.openai.com/api/accounts/user/register",
+                {"password": openai_password, "username": email},
+                headers={
+                    "Referer": "https://auth.openai.com/create-account/password",
+                    "openai-sentinel-token": sentinel,
+                },
+            )
+            if pwd_resp.status_code < 200 or pwd_resp.status_code >= 300:
+                raise RuntimeError(f"设置密码失败: {pwd_resp.status_code} {pwd_resp.text[:300]}")
+            log.info(f"      密码已设置")
+
+            # --- 5. 发送 OTP ---
+            time.sleep(random.uniform(0.5, 1.0))
+            otp_sent_at = time.time()
+            log.info(f"  [5] 发送 OTP...")
+            otp_resp = s.post_json(
+                "https://auth.openai.com/api/accounts/email-otp/send",
+                {},
+                headers={"Referer": "https://auth.openai.com/create-account/password"},
+            )
+            if otp_resp.status_code < 200 or otp_resp.status_code >= 300:
+                raise RuntimeError(f"发送 OTP 失败: {otp_resp.status_code} {otp_resp.text[:300]}")
+            log.info(f"      验证码已发送")
+
+        # --- 6. 获取并验证 OTP (功能 5: 支持重发) ---
+        def _resend():
+            r = s.post_json(
+                "https://auth.openai.com/api/accounts/email-otp/resend",
+                {},
+                headers={"Referer": "https://auth.openai.com/email-verification"},
+            )
+            return r.status_code >= 200 and r.status_code < 300
+
+        code = poll_verification_code(
+            email, proxies,
+            used_codes=codes,
+            resend_fn=_resend,
+            otp_sent_at=otp_sent_at,
+        )
+
+        time.sleep(random.uniform(0.3, 1.0))
+
+        # --- 7. 验证 OTP ---
+        log.info(f"  [7] 验证 OTP: {code}")
+        # 获取 email_otp_validate 的 sentinel
+        otp_sentinel = get_sentinel_header(device_id, ua, "email_otp_validate", proxies)
+        verify_resp = s.post_json(
+            "https://auth.openai.com/api/accounts/email-otp/validate",
+            {"code": code},
+            headers={
+                "Referer": "https://auth.openai.com/email-verification",
+                "openai-sentinel-token": otp_sentinel,
+            },
+        )
+        if verify_resp.status_code < 200 or verify_resp.status_code >= 300:
+            raise RuntimeError(f"OTP 验证失败: {verify_resp.status_code} {verify_resp.text[:300]}")
+        log.info(f"      OK")
+
+        time.sleep(random.uniform(0.5, 1.5))
+
+        # --- 8. 创建账号 (功能 3: 随机姓名/生日) ---
+        if is_existing_account:
+            log.info(f"  [8] 跳过创建账号（已存在）")
+        else:
+            name = random_name()
+            birthday = random_birthday()
+            log.info(f"  [8] 创建账号: {name}, {birthday}")
+            create_resp = s.post_json(
+                "https://auth.openai.com/api/accounts/create_account",
+                {"name": name, "birthdate": birthday},
+                headers={"Referer": "https://auth.openai.com/about-you"},
+            )
+            if create_resp.status_code < 200 or create_resp.status_code >= 300:
+                raise RuntimeError(f"创建账号失败: {create_resp.status_code} {create_resp.text[:300]}")
+            log.info(f"      OK")
+
+            # 检查是否需要手机验证
+            try:
+                create_data = create_resp.json()
+                create_page_type = create_data.get("page", {}).get("type", "")
+            except Exception:
+                create_page_type = ""
+
+            if create_page_type == "add_phone":
+                log.info(f"      需要手机验证，尝试密码登录绕过...")
+                return _login_for_token(s, oauth, email, openai_password, device_id, ua, codes, proxies)
+
+        # 新注册账号需要重新登录 (功能 2)
+        needs_relogin = not is_existing_account
+
+        if not needs_relogin:
+            # 已注册账号，直接完成 token 获取
+            return _complete_token_exchange(s, oauth, email, name, proxies)
+
+    # --- 新注册账号：重新发起登录流程 ---
+    log.info(f"  [8.5] 注册完成，重新发起登录流程...")
+    time.sleep(random.uniform(1.0, 2.0))
+
+    return _relogin_for_token(email, openai_password, proxies, codes)
+
+
+def _relogin_for_token(
+    email: str,
+    password: str,
+    proxies: Any = None,
+    used_codes: Optional[set] = None,
+) -> dict:
+    """重新登录获取 token (功能 2)"""
+    codes = used_codes or set()
+
+    with RegSession(proxies) as s:
+        oauth = generate_oauth_url()
+        log.info(f"  [8.5a] 重新发起 OAuth (登录)...")
+        resp = s.get(oauth.auth_url)
+        log.info(f"         状态: {resp.status_code}")
+
+        device_id = s.get_cookie("oai-did") or ""
+        if device_id:
+            log.info(f"         设备ID: {device_id[:16]}...")
+
+        time.sleep(random.uniform(0.8, 2.0))
+
+        # Sentinel
+        log.info(f"  [8.5b] 重新求解 Sentinel PoW...")
+        ua = s._session.headers.get("User-Agent", "Mozilla/5.0")
+        sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
+        log.info(f"         Sentinel token OK")
+
+        time.sleep(random.uniform(0.5, 1.5))
+
+        # 提交邮箱
+        log.info(f"  [8.5c] 提交邮箱 (登录): {email}")
+        login_resp = s.post_json(
+            "https://auth.openai.com/api/accounts/authorize/continue",
+            {"username": {"value": email, "kind": "email"}, "screen_hint": "login"},
+            headers={
+                "Referer": "https://auth.openai.com/log-in",
+                "openai-sentinel-token": sentinel,
+            },
+        )
+        if login_resp.status_code < 200 or login_resp.status_code >= 300:
+            raise RuntimeError(f"重新登录提交邮箱失败: {login_resp.status_code}")
+
+        try:
+            login_page_type = login_resp.json().get("page", {}).get("type", "")
+        except Exception:
+            login_page_type = ""
+
+        log.info(f"         页面类型: {login_page_type}")
+
+        if login_page_type != "login_password":
+            raise RuntimeError(f"重新登录未进入密码页面: {login_page_type}")
+
+        time.sleep(random.uniform(0.5, 1.5))
+
+        # 提交密码
+        pwd_sentinel = get_sentinel_header(device_id, ua, "password_verify", proxies)
+        log.info(f"  [8.5d] 提交登录密码...")
+        pwd_resp = s.post_json(
+            "https://auth.openai.com/api/accounts/password/verify",
+            {"password": password},
+            headers={
+                "Referer": "https://auth.openai.com/log-in/password",
+                "openai-sentinel-token": pwd_sentinel,
+            },
+        )
+        if pwd_resp.status_code < 200 or pwd_resp.status_code >= 300:
+            raise RuntimeError(f"重新登录提交密码失败: {pwd_resp.status_code}")
+
+        try:
+            pwd_page_type = pwd_resp.json().get("page", {}).get("type", "")
+        except Exception:
+            pwd_page_type = ""
+
+        log.info(f"         页面类型: {pwd_page_type}")
+
+        if pwd_page_type != "email_otp_verification":
+            raise RuntimeError(f"重新登录未进入验证码页面: {pwd_page_type}")
+
+        otp_sent_at = time.time()
+        log.info(f"         密码校验通过，等待验证码...")
+
+        time.sleep(random.uniform(0.5, 1.5))
+
+        # 获取并验证登录 OTP
+        def _resend():
+            r = s.post_json(
+                "https://auth.openai.com/api/accounts/email-otp/resend",
+                {},
+                headers={"Referer": "https://auth.openai.com/email-verification"},
+            )
+            return r.status_code >= 200 and r.status_code < 300
+
+        code = poll_verification_code(
+            email, proxies,
+            used_codes=codes,
+            resend_fn=_resend,
+            otp_sent_at=otp_sent_at,
+        )
+
+        log.info(f"  [8.5f] 验证登录 OTP: {code}")
+        otp_sentinel = get_sentinel_header(device_id, ua, "email_otp_validate", proxies)
+        verify_resp = s.post_json(
+            "https://auth.openai.com/api/accounts/email-otp/validate",
+            {"code": code},
+            headers={
+                "Referer": "https://auth.openai.com/email-verification",
+                "openai-sentinel-token": otp_sentinel,
+            },
+        )
+        if verify_resp.status_code < 200 or verify_resp.status_code >= 300:
+            raise RuntimeError(f"重新登录 OTP 验证失败: {verify_resp.status_code}")
+
+        log.info(f"         OK")
+
+        time.sleep(random.uniform(0.5, 1.5))
+
+        return _complete_token_exchange(s, oauth, email, "", proxies)
+
+
+def _login_for_token(
+    s: "RegSession",
+    oauth: OAuthStart,
+    email: str,
+    password: str,
+    device_id: str,
+    ua: str,
+    used_codes: Optional[set] = None,
+    proxies: Any = None,
+) -> dict:
+    """通过账号密码登录获取 token（绕过手机验证），复用现有会话保持指纹一致"""
+    codes = used_codes or set()
+    log.info("[*] ===== 尝试密码登录获取 token =====")
+
+    # 复用传入的会话，保持指纹一致
+    log.info("[*] 使用当前会话初始化登录...")
+    sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
+
+    # 提交用户名
+    log.info("[*] 提交用户名...")
+    login_resp = s.post_json(
+        "https://auth.openai.com/api/accounts/authorize/continue",
+        {"username": {"value": email, "kind": "email"}},
+        headers={
+            "Referer": "https://auth.openai.com/log-in",
+            "openai-sentinel-token": sentinel,
+        },
+    )
+
+    if login_resp.status_code < 200 or login_resp.status_code >= 300:
+        raise RuntimeError(f"用户名提交失败: {login_resp.status_code}")
+
+    # 提交密码
+    log.info("[*] 提交密码...")
+    pwd_sentinel = get_sentinel_header(device_id, ua, "password_verify", proxies)
+    pwd_resp = s.post_json(
+        "https://auth.openai.com/api/accounts/password/verify",
+        {"password": password},
+        headers={
+            "Referer": "https://auth.openai.com/log-in/password",
+            "openai-sentinel-token": pwd_sentinel,
+        },
+    )
+
+    if pwd_resp.status_code < 200 or pwd_resp.status_code >= 300:
+        raise RuntimeError(f"密码提交失败: {pwd_resp.status_code}")
+
+    try:
+        pwd_json = pwd_resp.json()
+        login_continue_url = pwd_json.get("continue_url", "")
+        login_page_type = pwd_json.get("page", {}).get("type", "")
+    except Exception:
+        login_continue_url = ""
+        login_page_type = ""
+
+    log.info(f"[*] 页面类型: {login_page_type}")
+
+    # 检查是否需要邮箱验证
+    need_login_otp = (
+        "email_otp" in login_page_type
+        or "email-verification" in login_continue_url
+    )
+
+    if need_login_otp:
+        log.info("[*] 需要邮箱验证...")
+        time.sleep(3)
+        
+        def _resend():
+            r = s.post_json(
+                "https://auth.openai.com/api/accounts/email-otp/resend",
+                {},
+                headers={"Referer": "https://auth.openai.com/email-verification"},
+            )
+            return r.status_code >= 200 and r.status_code < 300
+
+        code = poll_verification_code(email, proxies, used_codes=codes, resend_fn=_resend)
+        if not code:
+            raise RuntimeError("未获取到登录验证码")
+
+        log.info(f"[*] 验证码: {code}")
+        otp_sentinel = get_sentinel_header(device_id, ua, "email_otp_validate", proxies)
+        otp_resp = s.post_json(
+            "https://auth.openai.com/api/accounts/email-otp/validate",
+            {"code": code},
+            headers={
+                "Referer": "https://auth.openai.com/email-verification",
+                "openai-sentinel-token": otp_sentinel,
+            },
+        )
+
+        if otp_resp.status_code < 200 or otp_resp.status_code >= 300:
+            raise RuntimeError(f"验证码校验失败: {otp_resp.status_code}")
+
+        log.info("[*] 验证码验证成功")
+
+    return _complete_token_exchange(s, oauth, email, "", proxies)
+
+
+def _complete_token_exchange(
+    s: RegSession,
+    oauth: OAuthStart,
+    email: str,
+    name: str,
+    proxies: Any = None,
+) -> dict:
+    """完成 workspace 选择和 token 兑换"""
+
+    # --- 选择 Workspace ---
+    auth_cookie = s.get_cookie("oai-client-auth-session")
+    if not auth_cookie:
+        raise RuntimeError("未获取到 oai-client-auth-session cookie")
+
+    try:
+        cookie_data = _decode_jwt_segment(auth_cookie.split(".")[0])
+        workspaces = cookie_data.get("workspaces", [])
+        workspace_id = workspaces[0]["id"] if workspaces else None
+    except Exception as e:
+        raise RuntimeError(f"解析 workspace 失败: {e}")
+
+    if not workspace_id:
+        raise RuntimeError("未找到 workspace_id")
+
+    log.info(f"  [9] 选择 Workspace: {workspace_id[:20]}...")
+    select_resp = s.post_json(
+        "https://auth.openai.com/api/accounts/workspace/select",
+        {"workspace_id": workspace_id},
+        headers={"Referer": "https://auth.openai.com/sign-in-with-chatgpt/codex/consent"},
+    )
+
+    if select_resp.status_code < 200 or select_resp.status_code >= 300:
+        raise RuntimeError(f"选择 workspace 失败: {select_resp.status_code}")
+
+    continue_url = select_resp.json().get("continue_url")
+    if not continue_url:
+        raise RuntimeError("未获取到 continue_url")
+
+    # --- 跟随重定向获取 token ---
+    log.info(f"  [10] 跟随重定向获取 Token...")
+    callback_url = s.follow_redirects(continue_url)
+    if not callback_url:
+        raise RuntimeError("重定向失败，未获取到回调 URL")
+
+    token_json = submit_callback_url(
+        callback_url=callback_url,
+        code_verifier=oauth.code_verifier,
+        redirect_uri=oauth.redirect_uri,
+        expected_state=oauth.state,
+    )
+
+    log.info(f"  🎉 注册成功！")
+    
+    return {
+        "token": token_json,
+        "email": email,
+        "name": name,
     }
-    return changed;
-}
 
-// 上传单个文件（带重试和验证）
-async function uploadFile(filePath, retryCount = 3) {
-    const fileName = path.basename(filePath);
-    const fileContent = fs.readFileSync(filePath, 'utf-8');
-    
-    const url = BASE_URL + `/v0/management/auth-files?name=${encodeURIComponent(fileName)}`;
-    const parsedUrl = new URL(url);
-    
-    for (let attempt = 1; attempt <= retryCount; attempt++) {
-        try {
-            const result = await new Promise((resolve, reject) => {
-                const requestOptions = {
-                    hostname: parsedUrl.hostname,
-                    port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-                    path: parsedUrl.pathname + parsedUrl.search,
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${TOKEN}`,
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
-                    }
-                };
 
-                const client = parsedUrl.protocol === 'https:' ? https : http;
-                
-                const req = client.request(requestOptions, (res) => {
-                    let data = '';
-                    res.on('data', chunk => data += chunk);
-                    res.on('end', () => {
-                        if (res.statusCode >= 200 && res.statusCode < 300) {
-                            // 验证响应内容
-                            try {
-                                const respData = JSON.parse(data);
-                                if (respData.status === 'ok' || respData.status === 'success' || Object.keys(respData).length === 0) {
-                                    resolve({ success: true, fileName, response: respData });
-                                } else if (respData.error) {
-                                    reject(new Error(`服务端错误: ${respData.error}`));
-                                } else {
-                                    resolve({ success: true, fileName, response: respData });
-                                }
-                            } catch (e) {
-                                // 无法解析 JSON，但状态码成功，可能就是纯文本成功
-                                resolve({ success: true, fileName, response: data });
-                            }
-                        } else {
-                            reject(new Error(`HTTP ${res.statusCode}: ${data.substring(0, 200)}`));
-                        }
-                    });
-                });
+# ==========================================
+# 单次注册执行
+# ==========================================
 
-                req.on('error', reject);
-                req.write(fileContent);
-                req.end();
-            });
-            
-            // 上传成功后验证文件是否真的存在
-            if (result.success) {
-                const verified = await verifyUpload(fileName);
-                if (verified) {
-                    return result;
-                } else {
-                    console.log(`  [重试 ${attempt}/${retryCount}] 验证失败，文件可能未成功上传: ${fileName}`);
-                    if (attempt < retryCount) {
-                        await new Promise(r => setTimeout(r, 1000)); // 等待1秒后重试
-                        continue;
-                    }
-                    throw new Error('上传后验证失败');
-                }
-            }
-            
-        } catch (e) {
-            if (attempt < retryCount) {
-                console.log(`  [重试 ${attempt}/${retryCount}] 上传失败: ${e.message}`);
-                await new Promise(r => setTimeout(r, 1000)); // 等待1秒后重试
-                continue;
-            }
-            throw e;
-        }
-    }
-    
-    throw new Error('上传重试次数用尽');
-}
 
-// 验证文件是否上传成功
-async function verifyUpload(fileName) {
-    try {
-        const data = await httpRequest('/v0/management/auth-files');
-        const files = data.files || [];
-        return files.some(f => f.name === fileName);
-    } catch (e) {
-        console.log(`  验证请求失败: ${e.message}`);
-        return false;
-    }
-}
+def run_one(proxy: Optional[str], domain_index: int = DEFAULT_DOMAIN_INDEX) -> Optional[dict]:
+    """执行单次注册"""
+    proxies = {"http": proxy, "https": proxy} if proxy else None
 
-// 并发执行
-async function runConcurrent(items, fn, concurrency) {
-    const results = [];
-    for (let i = 0; i < items.length; i += concurrency) {
-        const chunk = items.slice(i, i + concurrency);
-        const chunkResults = await Promise.all(chunk.map(fn));
-        results.push(...chunkResults);
-        process.stdout.write(`\r进度: ${Math.min(i + concurrency, items.length)}/${items.length}`);
-    }
-    console.log();
-    return results;
-}
+    # IP 检查
+    try:
+        trace_resp = requests.get(
+            "https://cloudflare.com/cdn-cgi/trace",
+            proxies=proxies,
+            impersonate="chrome",
+            timeout=10,
+        )
+        loc_match = re.search(r"^loc=(.+)$", trace_resp.text, re.MULTILINE)
+        loc = loc_match.group(1) if loc_match else None
+        log.info(f"[*] 当前 IP 所在地: {loc}")
+        if loc in ("CN", "HK"):
+            raise RuntimeError("IP 所在地不支持，请检查代理")
+    except Exception as e:
+        log.error(f"[Error] 网络连接检查失败: {e}")
+        return None
 
-// 运行 Python 注册脚本一次
-function runRegisterScript() {
-    return new Promise((resolve, reject) => {
-        const scriptPath = path.join(__dirname, REGISTER_SCRIPT);
-        // 使用 shell: false 避免安全警告
-        const proc = spawn('python', [scriptPath, '--domain-index', String(DOMAIN_INDEX), '--once'], {
-            cwd: __dirname,
-            stdio: 'inherit',
-            shell: false
-        });
+    # 创建邮箱
+    try:
+        domains = get_domains(proxies)
+        if not domains:
+            log.error("[Error] 没有可用域名")
+            return None
+
+        local = f"oc{secrets.token_hex(5)}"
+        email_info = create_email(local, domain_index=domain_index, proxies=proxies)
+        email = email_info.get("address") or email_info.get("email")
+
+        if not email:
+            log.error("[Error] 创建邮箱失败")
+            return None
+
+        email_password = secrets.token_urlsafe(12)
+        if reset_mailbox_password(email, email_password, proxies=proxies):
+            log.info(f"[*] 成功创建邮箱: {email}")
+        else:
+            email_password = "默认密码"
+            log.info(f"[*] 创建邮箱: {email} (密码设置失败)")
+
+    except Exception as e:
+        log.error(f"[Error] 邮箱创建失败: {e}")
+        return None
+
+    # 生成 OpenAI 密码
+    openai_password = _generate_password()
+    log.info(f"[*] OpenAI 密码: {openai_password[:4]}****")
+
+    # 执行注册
+    try:
+        result = register_account(email, openai_password, proxies)
+        result["openai_password"] = openai_password
+        return result
+    except Exception as e:
+        log.error(f"[Error] 注册失败: {e}")
+        return {"email": email, "openai_password": openai_password, "error": str(e)}
+
+
+def save_result(result: dict):
+    """保存注册结果"""
+    if not result or not result.get("token"):
+        return
+
+    token_json = result.get("token", "{}")
+    email = result.get("email", "unknown")
+    password = result.get("openai_password", "")
+
+    try:
+        t_data = json.loads(token_json)
+        fname_email = t_data.get("email", email).replace("@", "_")
+    except Exception:
+        fname_email = email.replace("@", "_")
+
+    os.makedirs(TOKENS_DIR, exist_ok=True)
+    file_name = os.path.join(TOKENS_DIR, f"token_{fname_email}_{int(time.time())}.json")
+
+    with open(file_name, "w", encoding="utf-8") as f:
+        f.write(token_json)
+
+    log.info(f"[*] Token 已保存至: {file_name}")
+
+    # 保存账号信息
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(ACCOUNTS_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{timestamp} | {email} | {password}\n")
+
+
+# ==========================================
+# 主入口
+# ==========================================
+
+
+def main():
+    parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本 V3 - 优化版")
+    parser.add_argument("--proxy", default=None, help="代理地址，如 http://127.0.0.1:7890")
+    parser.add_argument("--domain-index", type=int, default=DEFAULT_DOMAIN_INDEX, help="邮箱域名索引")
+    parser.add_argument("--count", type=int, default=1, help="注册数量")
+    parser.add_argument("--workers", type=int, default=1, help="并发线程数")
+    parser.add_argument("--once", action="store_true", help="只运行一次")
+    parser.add_argument("--sleep-min", type=int, default=5, help="循环模式最短等待秒数")
+    parser.add_argument("--sleep-max", type=int, default=30, help="循环模式最长等待秒数")
+    parser.add_argument("--save-account", action="store_true", help="保存账号密码")
+    args = parser.parse_args()
+
+    log.info("=" * 55)
+    log.info(" OpenAI 自动注册 V3 - 优化版")
+    log.info("=" * 55)
+
+    if not HAS_SENTINEL_POW:
+        log.warning("⚠️ sentinel_pow 模块未安装，将使用空 PoW（可能被风控）")
+
+    proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
+
+    if args.once or args.count == 1:
+        # 单次模式
+        result = run_one(args.proxy, args.domain_index)
+        if result and result.get("token"):
+            save_result(result)
+        # 清理邮箱
+        if result and result.get("email"):
+            delete_mailbox(result["email"], proxies)
+        return
+
+    # 批量模式
+    total = args.count
+    workers = min(args.workers, total)
+    stats = {"ok": 0, "fail": 0}
+    lock = threading.Lock()
+
+    def _do_one(idx: int, delay: float = 0):
+        if delay > 0:
+            time.sleep(delay)
         
-        proc.on('close', (code) => {
-            // 不再通过退出码判断成功，由调用方检查是否有新 token 文件
-            resolve(code === 0);
-        });
-        
-        proc.on('error', (err) => {
-            console.error(`启动注册脚本失败: ${err.message}`);
-            resolve(false);
-        });
-    });
-}
+        start_t = time.time()
+        log.info(f"\n{'─'*50}")
+        log.info(f"[{idx}/{total}] 开始注册...")
+        log.info(f"{'─'*50}")
 
-// 注册账号（抽取的注册逻辑）
-async function registerAccounts(needCount) {
-    console.log(`开始注册 ${needCount} 个账号...`);
-    console.log(`注册总时长限制: ${REGISTER_TIMEOUT / 1000} 秒`);
-    
-    let successCount = 0;
-    let failCount = 0;
-    let consecutiveFails = 0;  // 连续失败计数
-    const MAX_CONSECUTIVE_FAILS = 5;  // 最大连续失败次数
-    const startTime = Date.now();
-    const generatedTokenFiles = new Map(); // name -> filePath（本轮注册产生/覆盖的 token 文件）
-    
-    while (successCount < needCount) {
-        // 检查是否超时
-        const elapsed = Date.now() - startTime;
-        if (elapsed >= REGISTER_TIMEOUT) {
-            console.log(`\n[Warn] 注册总时长已达 ${REGISTER_TIMEOUT / 1000} 秒，停止注册`);
-            break;
-        }
+        result = run_one(args.proxy, args.domain_index)
         
-        // 检查是否连续失败次数达到上限
-        if (consecutiveFails >= MAX_CONSECUTIVE_FAILS) {
-            console.log(`\n[Error] 连续失败 ${consecutiveFails} 次，停止注册`);
-            break;
-        }
-        
-        console.log(`\n--- 注册第 ${successCount + 1}/${needCount} 个账号 (剩余时间: ${Math.round((REGISTER_TIMEOUT - elapsed) / 1000)}秒) ---`);
-        
-        // 记录注册前的 token 文件快照（用于识别新增/覆盖）
-        const beforeSnap = snapshotTokenFiles();
-         
-        await runRegisterScript();
-         
-        // 检查是否有新生成或被覆盖的 token 文件
-        const afterSnap = snapshotTokenFiles();
-        const newTokenFiles = diffTokenFiles(beforeSnap, afterSnap);
-         
-        if (newTokenFiles.length > 0) {
-            successCount++;
-            consecutiveFails = 0;  // 成功后重置连续失败计数
-            console.log(`  ✓ 注册成功，生成 ${newTokenFiles.length} 个 token 文件`);
+        if result and result.get("token"):
+            save_result(result)
+            with lock:
+                stats["ok"] += 1
+            elapsed = round(time.time() - start_t, 1)
+            log.info(f"  ✅ 成功 ({elapsed}s)")
+        else:
+            with lock:
+                stats["fail"] += 1
+            log.info(f"  ❌ 失败")
 
-            // 记录本轮注册产生/覆盖的 token 文件，注册完毕后兜底上传
-            for (const filePath of newTokenFiles) {
-                generatedTokenFiles.set(path.basename(filePath), filePath);
-            }
-             
-            // 上传并删除新文件
-            for (const filePath of newTokenFiles) {
-                const fileName = path.basename(filePath);
-                try {
-                    await uploadFile(filePath);
-                    console.log(`  ✓ 上传新账号: ${fileName}`);
-                    fs.unlinkSync(filePath);
-                    console.log(`  ✓ 已删除本地文件: ${fileName}`);
-                    generatedTokenFiles.delete(fileName);
-                } catch (e) {
-                    console.log(`  ✗ 上传失败: ${fileName} - ${e.message}`);
-                }
-            }
-        } else {
-            failCount++;
-            consecutiveFails++;  // 失败时增加连续失败计数
-            console.log(`  ✗ 注册失败，未生成 token 文件 (连续失败 ${consecutiveFails}/${MAX_CONSECUTIVE_FAILS})`);
-        }
-    }
-    
-    console.log(`\n注册完成: 成功 ${successCount}/${needCount}, 失败重试 ${failCount} 次`);
+        # 清理邮箱
+        if result and result.get("email"):
+            delete_mailbox(result["email"], proxies)
 
-    // 注册完毕后兜底：将本轮注册产生但尚未上传成功的 token 文件再尝试上传并删除
-    const pending = Array.from(generatedTokenFiles.values()).filter(p => {
-        try {
-            return fs.existsSync(p);
-        } catch {
-            return false;
-        }
-    });
-    if (pending.length > 0) {
-        console.log(`\n注册完毕后检测到 ${pending.length} 个未上传的 token 文件，开始补传...`);
-        for (const filePath of pending) {
-            const fileName = path.basename(filePath);
-            try {
-                await uploadFile(filePath);
-                console.log(`  ✓ 补传成功: ${fileName}`);
-                fs.unlinkSync(filePath);
-                console.log(`  ✓ 已删除本地文件: ${fileName}`);
-                generatedTokenFiles.delete(fileName);
-            } catch (e) {
-                console.log(`  ✗ 补传失败: ${fileName} - ${e.message}`);
-            }
-        }
-    }
-    return successCount;
-}
+    if workers <= 1:
+        # 串行
+        for i in range(1, total + 1):
+            _do_one(i)
+            if i < total:
+                wait = random.randint(args.sleep_min, args.sleep_max)
+                log.info(f"[*] 休息 {wait} 秒...")
+                time.sleep(wait)
+    else:
+        # 并行
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {}
+            for i in range(1, total + 1):
+                wave_pos = (i - 1) % workers
+                delay = wave_pos * random.uniform(1.0, 2.5) if wave_pos > 0 else 0
+                fut = pool.submit(_do_one, i, delay)
+                futs[fut] = i
 
-// 检测并删除失效账号（返回当前有效 codex 账号数量）
-async function checkAndCleanAccounts() {
-    console.log('\n--- 检测账号状态 ---');
-    
-    let accounts;
-    try {
-        accounts = await getAccounts();
-    } catch (e) {
-        console.error(`获取账号列表失败: ${e.message}`);
-        return 0;
-    }
-    
-    const codexAccounts = accounts.filter(acc => acc.provider === 'codex');
-    console.log(`当前 codex 账号: ${codexAccounts.length} 个`);
-    
-    if (codexAccounts.length === 0) {
-        return 0;
-    }
-    
-    // 检测账号状态
-    const checkResults = await runConcurrent(codexAccounts, checkAccount, CONCURRENCY);
-    
-    // 统计结果
-    const invalid401Accounts = checkResults.filter(r => r.invalid_401);
-    const lowQuotaAccounts = checkResults.filter(r => r.low_quota);
-    const okAccounts = checkResults.filter(r => !r.invalid_401 && !r.low_quota && !r.error);
-    
-    console.log(`  - 401 失效: ${invalid401Accounts.length} 个`);
-    console.log(`  - 额度不足: ${lowQuotaAccounts.length} 个`);
-    console.log(`  - 正常: ${okAccounts.length} 个`);
-    
-    // 删除失效账号
-    const toDelete = [];
-    invalid401Accounts.forEach(acc => toDelete.push({ name: acc.name, reason: '401' }));
-    lowQuotaAccounts.forEach(acc => {
-        if (!toDelete.find(d => d.name === acc.name)) {
-            const remain = (acc.remaining_percent !== null && acc.remaining_percent !== undefined)
-                ? `${Math.round(acc.remaining_percent * 10) / 10}%`
-                : 'unknown';
-            toDelete.push({ name: acc.name, reason: `quota<${QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT}% (remain=${remain})` });
-        }
-    });
-    
-    if (toDelete.length > 0) {
-        console.log(`\n删除 ${toDelete.length} 个失效账号...`);
-        for (const acc of toDelete) {
-            try {
-                await deleteAccount(acc.name);
-                console.log(`  ✓ 删除: ${acc.name} (${acc.reason})`);
-            } catch (e) {
-                console.log(`  ✗ 删除失败: ${acc.name} - ${e.message}`);
-            }
-        }
-    }
-    
-    // 返回有效账号数量
-    return okAccounts.length;
-}
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception as e:
+                    log.error(f"线程异常: {e}")
 
-// 主函数
-async function main() {
-    console.log('='.repeat(60));
-    console.log('Codex 账号维护工具');
-    console.log('='.repeat(60));
-    console.log(`域名索引: ${DOMAIN_INDEX}`);
-    console.log(`注册时长限制: ${REGISTER_TIMEOUT / 1000} 秒`);
-    console.log(`注册脚本: ${REGISTER_SCRIPT}`);
-    console.log(`账号阈值: ${MIN_ACCOUNTS}`);
-    console.log(`服务地址: ${BASE_URL}`);
-    console.log(`并发数: ${CONCURRENCY}`);
-    console.log(`额度删除阈值: ${QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT}%`);
-    console.log();
+    log.info(f"\n{'='*55}")
+    log.info(f"  注册完成")
+    log.info(f"{'='*55}")
+    log.info(f"  ✅ 成功: {stats['ok']}")
+    log.info(f"  ❌ 失败: {stats['fail']}")
+    log.info(f"  📁 结果: {TOKENS_DIR}")
 
-    const SLEEP_DURATION = 60 * 1000; // 休眠 1 分钟
-    let round = 0;
 
-    while (true) {
-        round++;
-        console.log('\n' + '='.repeat(60));
-        console.log(`第 ${round} 轮维护`);
-        console.log('='.repeat(60));
-
-        // 1. 检测并删除失效账号，获取当前有效数量
-        const validCount = await checkAndCleanAccounts();
-        console.log(`\n当前有效 codex 账号: ${validCount} 个，阈值: ${MIN_ACCOUNTS}`);
-        
-        // 2. 计算需要补充的数量
-        const needCount = MIN_ACCOUNTS - validCount;
-        
-        if (needCount <= 0) {
-            // 账号充足，休眠 1 分钟后继续检测
-            console.log(`\n账号充足 (>= ${MIN_ACCOUNTS})，休眠 60 秒后继续检测...`);
-            await new Promise(r => setTimeout(r, SLEEP_DURATION));
-            continue;
-        }
-        
-        console.log(`\n需要补充 ${needCount} 个账号...`);
-        
-        // 3. 先检查本地是否有 token 文件可上传
-        const tokenFiles = scanTokenFiles();
-        let uploadedFromLocal = false;
-        
-        if (tokenFiles.length > 0) {
-            console.log(`\n上传 1 个本地 token 文件...`);
-            const filePath = tokenFiles[0];
-            const fileName = path.basename(filePath);
-            try {
-                await uploadFile(filePath);
-                console.log(`  ✓ 上传成功: ${fileName}`);
-                fs.unlinkSync(filePath);
-                console.log(`  ✓ 已删除本地文件: ${fileName}`);
-                uploadedFromLocal = true;
-            } catch (e) {
-                console.log(`  ✗ 上传失败: ${fileName} - ${e.message}`);
-            }
-        }
-        
-        // 4. 如果没有本地文件可上传，尝试注册一次
-        if (!uploadedFromLocal) {
-            console.log(`\n尝试注册 1 个账号...`);
-            
-            // 记录注册前的 token 文件快照
-            const beforeSnap = snapshotTokenFiles();
-            
-            await runRegisterScript();
-            
-            // 检查是否生成新 token 文件
-            const afterSnap = snapshotTokenFiles();
-            const newTokenFiles = diffTokenFiles(beforeSnap, afterSnap);
-            
-            if (newTokenFiles.length > 0) {
-                console.log(`  ✓ 注册成功，生成 ${newTokenFiles.length} 个 token 文件`);
-                
-                // 上传并删除
-                for (const filePath of newTokenFiles) {
-                    const fileName = path.basename(filePath);
-                    try {
-                        await uploadFile(filePath);
-                        console.log(`  ✓ 上传新账号: ${fileName}`);
-                        fs.unlinkSync(filePath);
-                        console.log(`  ✓ 已删除本地文件: ${fileName}`);
-                    } catch (e) {
-                        console.log(`  ✗ 上传失败: ${fileName} - ${e.message}`);
-                    }
-                }
-            } else {
-                console.log(`  ✗ 注册失败，未生成 token 文件`);
-            }
-        }
-        
-        // 注册成功或失败后，停止运行
-        console.log('\n' + '='.repeat(60));
-        console.log('维护完成');
-        console.log('='.repeat(60));
-        break;
-    }
-}
-
-main().catch(e => {
-    console.error('执行失败:', e.message);
-    process.exit(1);
-});
+if __name__ == "__main__":
+    main()
