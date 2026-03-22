@@ -199,6 +199,116 @@ def pick_browser_profile() -> tuple:
 
 
 # ==========================================
+# 人类行为模拟 - 反检测措施
+# ==========================================
+
+def human_delay(action: str = "default") -> float:
+    """
+    模拟人类操作延迟，返回延迟秒数
+    不同操作类型有不同的延迟特征
+    """
+    delay_profiles = {
+        # 页面加载后阅读/思考
+        "read": (1.5, 4.0),
+        "think": (0.8, 2.5),
+        # 表单操作
+        "type_email": (2.0, 5.0),  # 输入邮箱需要时间
+        "type_password": (1.5, 3.5),  # 输入密码
+        "type_code": (2.5, 6.0),  # 输入验证码（需要查看）
+        "click": (0.3, 1.2),
+        "form_submit": (0.5, 1.5),
+        # 网络等待
+        "network": (0.5, 1.5),
+        "redirect": (0.3, 0.8),
+        # 默认
+        "default": (0.5, 2.0),
+    }
+    lo, hi = delay_profiles.get(action, delay_profiles["default"])
+    
+    # 使用正态分布让延迟更自然（大多数人操作在平均值附近）
+    mean = (lo + hi) / 2
+    std = (hi - lo) / 4
+    delay = random.gauss(mean, std)
+    
+    # 限制在合理范围内
+    return max(lo, min(hi, delay))
+
+
+def human_sleep(action: str = "default") -> None:
+    """执行人类行为模拟延迟"""
+    delay = human_delay(action)
+    time.sleep(delay)
+
+
+def generate_sec_ch_ua(profile: str) -> str:
+    """根据浏览器指纹生成 Sec-CH-UA 头"""
+    if profile.startswith("chrome"):
+        # 提取版本号
+        version = profile.replace("chrome", "").replace("a", "")
+        if version.isdigit():
+            v = int(version)
+            return f'"Chromium";v="{v}", "Google Chrome";v="{v}", "Not?A_Brand";v="99"'
+        return '"Chromium";v="120", "Google Chrome";v="120", "Not?A_Brand";v="99"'
+    
+    elif profile.startswith("edge"):
+        version = profile.replace("edge", "")
+        if version.isdigit():
+            v = int(version)
+            return f'"Chromium";v="{v}", "Microsoft Edge";v="{v}", "Not?A_Brand";v="99"'
+        return '"Chromium";v="120", "Microsoft Edge";v="120", "Not?A_Brand";v="99"'
+    
+    elif profile.startswith("safari"):
+        # Safari 通常不发送 Sec-CH-UA，或发送简短版本
+        return '"Safari";v="605.1.15"'
+    
+    elif profile.startswith("firefox"):
+        # Firefox 不发送 Sec-CH-UA
+        return ""
+    
+    return ""
+
+
+def get_browser_platform(profile: str) -> str:
+    """根据浏览器类型返回可能的平台"""
+    if profile.startswith("safari"):
+        # Safari 通常是 macOS 或 iOS
+        return random.choice(["macOS", "iPhone", "iPad"])
+    elif profile.startswith("chrome"):
+        return random.choice(["Windows", "macOS", "Linux", "Chrome OS"])
+    elif profile.startswith("edge"):
+        return random.choice(["Windows", "macOS"])
+    elif profile.startswith("firefox"):
+        return random.choice(["Windows", "macOS", "Linux"])
+    return "Windows"
+
+
+def generate_client_hints(profile: str, lang: str) -> Dict[str, str]:
+    """生成现代浏览器的客户端提示头"""
+    hints = {}
+    sec_ch_ua = generate_sec_ch_ua(profile)
+    
+    if sec_ch_ua:
+        hints["Sec-CH-UA"] = sec_ch_ua
+        hints["Sec-CH-UA-Mobile"] = "?0"
+        hints["Sec-CH-UA-Platform"] = f'"{get_browser_platform(profile)}"'
+    
+    # Sec-Fetch 系列头
+    hints["Sec-Fetch-Dest"] = "document"
+    hints["Sec-Fetch-Mode"] = "navigate"
+    hints["Sec-Fetch-Site"] = "same-origin"
+    hints["Sec-Fetch-User"] = "?1"
+    
+    # DNT (Do Not Track) - 随机化
+    if random.random() < 0.6:
+        hints["DNT"] = "1"
+    
+    # Connection
+    hints["Connection"] = "keep-alive"
+    
+    return hints
+
+
+# ==========================================
 # MailFree 邮箱 API
 # ==========================================
 
@@ -626,7 +736,7 @@ def get_sentinel_header(device_id: str, user_agent: str, flow: str = "authorize_
 
 
 class RegSession:
-    """注册会话，支持随机浏览器指纹"""
+    """注册会话，支持随机浏览器指纹和反检测措施"""
 
     def __init__(self, proxies: Any = None):
         self.profile, self.lang = pick_browser_profile()
@@ -635,11 +745,26 @@ class RegSession:
             proxies=proxies,
             impersonate=self.profile,
         )
-        self._session.headers.update({
+        
+        # 基础请求头
+        base_headers = {
             "Accept-Language": self.lang,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        })
-        log.info(f"    🎭 浏览器指纹: {self.profile}")
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": random.choice(["max-age=0", "no-cache", ""]),
+            "Pragma": random.choice(["no-cache", ""]),
+            "Upgrade-Insecure-Requests": "1",
+        }
+        
+        # 添加客户端提示头
+        client_hints = generate_client_hints(self.profile, self.lang)
+        base_headers.update({k: v for k, v in client_hints.items() if v})
+        
+        self._session.headers.update(base_headers)
+        
+        # 记录信息
+        platform = get_browser_platform(self.profile)
+        log.info(f"    🎭 浏览器指纹: {self.profile} | 平台: {platform}")
 
     def get(self, url: str, **kwargs) -> Any:
         return self._session.get(url, timeout=30, **kwargs)
@@ -707,7 +832,7 @@ def register_account(
         if device_id:
             log.info(f"      设备ID: {device_id[:16]}...")
 
-        time.sleep(random.uniform(0.8, 2.0))
+        human_sleep("read")  # 页面加载后阅读
 
         # --- 2. 获取 Sentinel (功能 1: 真实 PoW) ---
         log.info(f"  [2] 求解 Sentinel PoW...")
@@ -715,7 +840,7 @@ def register_account(
         sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
         log.info(f"      Sentinel token OK")
 
-        time.sleep(random.uniform(0.5, 1.5))
+        human_sleep("think")  # 思考时间
 
         # --- 3. 提交邮箱 ---
         log.info(f"  [3] 提交邮箱: {email}")
@@ -743,7 +868,7 @@ def register_account(
         # 已注册账号判断
         is_existing_account = (page_type == "email_otp_verification")
 
-        time.sleep(random.uniform(0.5, 1.5))
+        human_sleep("network")  # 网络响应等待
 
         name = ""
 
@@ -767,7 +892,7 @@ def register_account(
             log.info(f"      密码已设置")
 
             # --- 5. 发送 OTP ---
-            time.sleep(random.uniform(0.5, 1.0))
+            human_sleep("click")  # 点击发送按钮
             otp_sent_at = time.time()
             log.info(f"  [5] 发送 OTP...")
             otp_resp = s.post_json(
@@ -795,7 +920,7 @@ def register_account(
             otp_sent_at=otp_sent_at,
         )
 
-        time.sleep(random.uniform(0.3, 1.0))
+        human_sleep("type_code")  # 模拟输入验证码的时间
 
         # --- 7. 验证 OTP ---
         log.info(f"  [7] 验证 OTP: {code}")
@@ -813,7 +938,7 @@ def register_account(
             raise RuntimeError(f"OTP 验证失败: {verify_resp.status_code} {verify_resp.text[:300]}")
         log.info(f"      OK")
 
-        time.sleep(random.uniform(0.5, 1.5))
+        human_sleep("network")  # 等待网络响应
 
         # --- 8. 创建账号 (功能 3: 随机姓名/生日) ---
         if is_existing_account:
@@ -851,7 +976,7 @@ def register_account(
 
     # --- 新注册账号：重新发起登录流程 ---
     log.info(f"  [8.5] 注册完成，重新发起登录流程...")
-    time.sleep(random.uniform(1.0, 2.0))
+    human_sleep("think")  # 思考时间
 
     return _relogin_for_token(email, openai_password, proxies, codes)
 
@@ -875,7 +1000,7 @@ def _relogin_for_token(
         if device_id:
             log.info(f"         设备ID: {device_id[:16]}...")
 
-        time.sleep(random.uniform(0.8, 2.0))
+        human_sleep("read")  # 页面加载后阅读
 
         # Sentinel
         log.info(f"  [8.5b] 重新求解 Sentinel PoW...")
@@ -883,7 +1008,7 @@ def _relogin_for_token(
         sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
         log.info(f"         Sentinel token OK")
 
-        time.sleep(random.uniform(0.5, 1.5))
+        human_sleep("think")  # 思考时间
 
         # 提交邮箱
         log.info(f"  [8.5c] 提交邮箱 (登录): {email}")
@@ -908,7 +1033,7 @@ def _relogin_for_token(
         if login_page_type != "login_password":
             raise RuntimeError(f"重新登录未进入密码页面: {login_page_type}")
 
-        time.sleep(random.uniform(0.5, 1.5))
+        human_sleep("network")  # 网络响应等待
 
         # 提交密码
         pwd_sentinel = get_sentinel_header(device_id, ua, "password_verify", proxies)
@@ -937,7 +1062,7 @@ def _relogin_for_token(
         otp_sent_at = time.time()
         log.info(f"         密码校验通过，等待验证码...")
 
-        time.sleep(random.uniform(0.5, 1.5))
+        human_sleep("network")  # 网络响应等待
 
         # 获取并验证登录 OTP
         def _resend():
@@ -970,7 +1095,7 @@ def _relogin_for_token(
 
         log.info(f"         OK")
 
-        time.sleep(random.uniform(0.5, 1.5))
+        human_sleep("network")  # 网络响应等待
 
         return _complete_token_exchange(s, oauth, email, "", proxies)
 
@@ -1040,7 +1165,7 @@ def _login_for_token(
 
         if need_login_otp:
             log.info("[*] 需要邮箱验证...")
-            time.sleep(3)
+            human_sleep("network")  # 等待验证码发送
             
             def _resend():
                 r = s.post_json(
