@@ -108,15 +108,14 @@ _FAMILY_NAMES = [
     "Russell", "Sullivan", "Bell", "Coleman", "Butler", "Henderson", "Barnes",
 ]
 
-# 浏览器指纹列表 - curl_cffi 支持的版本（按浏览器分组）
+# 浏览器指纹列表 - curl_cffi 官方支持的版本（按浏览器分组）
 _BROWSER_PROFILES_CHROME = [
     'chrome99', 'chrome100', 'chrome101', 'chrome104', 'chrome107',
     'chrome110', 'chrome116', 'chrome119', 'chrome120', 'chrome123',
-    'chrome124', 'chrome126', 'chrome127', 'chrome131', 'chrome133a',
-    'chrome136', 'chrome140', 'chrome142', 'chrome146',
+    'chrome124', 'chrome131', 'chrome133a', 'chrome136', 'chrome142',
 ]
 
-_BROWSER_PROFILES_EDGE = ['edge99', 'edge101', 'edge131']
+_BROWSER_PROFILES_EDGE = ['edge99', 'edge101']
 
 _BROWSER_PROFILES_SAFARI = [
     'safari15_3', 'safari15_5', 'safari17_0', 'safari17_2_ios', 'safari18_0',
