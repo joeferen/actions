@@ -72,7 +72,7 @@ DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback"
 DEFAULT_SCOPE = "openid email profile offline_access"
 
 ACCOUNTS_FILE = os.path.join(SCRIPT_DIR, "email_accounts_v3.txt")
-TOKENS_DIR = os.path.join(SCRIPT_DIR, "tokens_v3")
+TOKENS_DIR = SCRIPT_DIR  # 保存到当前目录，兼容 codex_maintenance.js
 
 # 超时与重试配置
 MAIL_POLL_TIMEOUT = 180
