@@ -1305,13 +1305,14 @@ def _complete_token_exchange(
 # ==========================================
 
 
-def run_one(proxy: Optional[str], domain: Optional[str] = None) -> Optional[dict]:
+def run_one(proxy: Optional[str], domain: Optional[str] = None, domain_index: int = 0) -> Optional[dict]:
     """
     执行单次注册
     
     Args:
         proxy: 代理地址
-        domain: TempMail 域名（可选）
+        domain: TempMail 域名（可选，用于自定义域名）
+        domain_index: [兼容v3] 邮箱域名索引（TempMail.lol 忽略此参数）
     
     Returns:
         dict: 注册结果
@@ -1405,7 +1406,9 @@ def save_result(result: dict):
 def main():
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本 V4 - TempMail.lol 版")
     parser.add_argument("--proxy", default=None, help="代理地址，如 http://127.0.0.1:7890")
-    parser.add_argument("--domain", default=None, help="TempMail 域名（可选）")
+    # 兼容 v3 的 --domain-index 参数（TempMail.lol 不使用索引，保留参数以兼容）
+    parser.add_argument("--domain-index", type=int, default=0, help="[兼容v3] 邮箱域名索引（TempMail.lol 忽略此参数）")
+    parser.add_argument("--domain", default=None, help="TempMail 域名（可选，用于自定义域名）")
     parser.add_argument("--count", type=int, default=1, help="注册数量")
     parser.add_argument("--workers", type=int, default=1, help="并发线程数")
     parser.add_argument("--once", action="store_true", help="只运行一次")
@@ -1425,7 +1428,7 @@ def main():
 
     if args.once or args.count == 1:
         # 单次模式
-        result = run_one(args.proxy, args.domain)
+        result = run_one(args.proxy, args.domain, args.domain_index)
         if result and result.get("token"):
             save_result(result)
         return
@@ -1445,7 +1448,7 @@ def main():
         log.info(f"[{idx}/{total}] 开始注册...")
         log.info(f"{'─'*50}")
 
-        result = run_one(args.proxy, args.domain)
+        result = run_one(args.proxy, args.domain, args.domain_index)
         
         if result and result.get("token"):
             save_result(result)
