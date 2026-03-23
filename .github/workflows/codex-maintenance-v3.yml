@@ -38,12 +38,15 @@ jobs:
           python-version: '3.12'
       
       - name: Install Python dependencies
+        id: install_python
+        continue-on-error: true
         run: |
           pip install curl_cffi
       
       - name: Run codex maintenance (V3)
+        if: steps.install_python.outcome == 'success'
         id: maintenance
-        timeout-minutes: 6
+        timeout-minutes: 331
         continue-on-error: true
         env:
           BASE_URL: ${{ vars.CODEX_BASE_URL }}
@@ -51,12 +54,12 @@ jobs:
           DEFAULT_MIN_ACCOUNTS: ${{ vars.DEFAULT_MIN_ACCOUNTS || '100' }}
           DEFAULT_QUOTA_THRESHOLD: ${{ vars.DEFAULT_QUOTA_THRESHOLD || '20' }}
           DEFAULT_DOMAIN_INDEX: ${{ vars.DEFAULT_DOMAIN_INDEX || '0' }}
-          TIMEOUT_SECONDS: "330"
+          TIMEOUT_SECONDS: "19800"
         run: |
           cd openai-zhuce
           
-          # 使用 timeout 命令限制运行时间为 5 分 30 秒 (330 秒)
-          timeout 330s node codex_maintenance.js \
+          # 使用 timeout 命令限制运行时间为 5 小时 30 分 (19800 秒)
+          timeout 19800s node codex_maintenance.js \
             "${{ github.event.inputs.min_accounts || env.DEFAULT_MIN_ACCOUNTS }}" \
             "${{ github.event.inputs.quota_threshold || env.DEFAULT_QUOTA_THRESHOLD }}" \
             "${{ env.BASE_URL }}" \
@@ -68,11 +71,12 @@ jobs:
           
           exit_code=$?
           if [ $exit_code -eq 124 ]; then
-            echo "::warning::运行超时 (5分30秒)，将重新触发 workflow"
+            echo "::warning::运行超时 (5小时30分钟)，将重新触发 workflow"
           fi
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
       
       - name: Re-trigger workflow
+        if: always()
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
