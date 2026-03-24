@@ -13,14 +13,20 @@
  *   register_timeout - 注册循环总时长限制（秒），超时后停止注册
  *   register_script  - 注册脚本名称（如 openai_register_v2.py）
  *   concurrency      - 并发数，默认 50
- *   --register-count N - 直接注册 N 个账号（跳过账号检测，无论成功失败都继续）
+ *   --register-count N - 注册模式控制：
+ *                        - 不指定：默认注册 1 个账号
+ *                        - N = 0：检测账号状态，注册不足的数量
+ *                        - N > 0：直接注册 N 个账号（跳过账号检测）
  * 
  * 运行示例：
- *   # 基本用法：设置账号阈值为 100
+ *   # 默认模式：注册 1 个账号
  *   node codex_maintenance.js 100
  * 
- *   # 设置账号阈值 150，额度删除阈值 10%
- *   node codex_maintenance.js 150 10
+ *   # 补充模式：检测账号状态，注册不足的数量
+ *   node codex_maintenance.js 100 --register-count 0
+ * 
+ *   # 批量注册模式：直接注册 10 个账号
+ *   node codex_maintenance.js 100 --register-count 10
  * 
  *   # 完整参数：指定服务器地址和令牌
  *   node codex_maintenance.js 100 20 https://api.example.com your_token 0 1800 openai_register_v2.py 50
@@ -29,9 +35,6 @@
  *   set BASE_URL=https://api.example.com
  *   set TOKEN=your_token
  *   node codex_maintenance.js 100
- * 
- *   # 直接注册 10 个账号（跳过账号检测）
- *   node codex_maintenance.js 100 20 https://api.example.com your_token --register-count 10
  */
 
 const https = require('https');
@@ -58,11 +61,16 @@ const FINAL_ACCOUNT_NOTIFY_THRESHOLD_RATIO = 0.9;
 const args = process.argv.slice(2);
 
 // 解析 --register-count 参数
-let REGISTER_COUNT = 0;
+// undefined 表示未指定，0 表示显式传入 0，> 0 表示显式传入正数
+let REGISTER_COUNT = undefined;
 let positionalArgs = [];
 for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--register-count' && args[i + 1]) {
-        REGISTER_COUNT = parseInt(args[++i]) || 0;
+    if (args[i] === '--register-count' && i + 1 < args.length) {
+        const val = args[++i];
+        REGISTER_COUNT = parseInt(val);
+        if (isNaN(REGISTER_COUNT)) {
+            REGISTER_COUNT = undefined;
+        }
     } else {
         positionalArgs.push(args[i]);
     }
@@ -661,58 +669,19 @@ async function main() {
     console.log(`服务地址: ${BASE_URL}`);
     console.log(`并发数: ${CONCURRENCY}`);
     console.log(`额度删除阈值: ${QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT}%`);
+    
+    // 显示注册模式
+    if (REGISTER_COUNT === undefined) {
+        console.log(`注册模式: 默认注册 1 个账号`);
+    } else if (REGISTER_COUNT === 0) {
+        console.log(`注册模式: 补充不足数量`);
+    } else {
+        console.log(`注册模式: 批量注册 ${REGISTER_COUNT} 个账号`);
+    }
     console.log();
 
     const SLEEP_DURATION = 60 * 1000; // 休眠 1 分钟
     let round = 0;
-
-    // 如果指定了注册数量，直接批量注册
-    if (REGISTER_COUNT > 0) {
-        console.log(`\n注册模式: 批量注册 ${REGISTER_COUNT} 个账号`);
-        
-        let successCount = 0;
-        let failCount = 0;
-        
-        for (let i = 1; i <= REGISTER_COUNT; i++) {
-            console.log(`\n--- 注册第 ${i}/${REGISTER_COUNT} 个账号 ---`);
-            
-            // 记录注册前的 token 文件快照
-            const beforeSnap = snapshotTokenFiles();
-            
-            await runRegisterScript();
-            
-            // 检查是否生成新 token 文件
-            const afterSnap = snapshotTokenFiles();
-            const newTokenFiles = diffTokenFiles(beforeSnap, afterSnap);
-            
-            if (newTokenFiles.length > 0) {
-                successCount++;
-                console.log(`  ✓ 注册成功，生成 ${newTokenFiles.length} 个 token 文件`);
-                
-                // 上传并删除
-                for (const filePath of newTokenFiles) {
-                    const fileName = path.basename(filePath);
-                    try {
-                        await uploadFile(filePath);
-                        console.log(`  ✓ 上传新账号: ${fileName}`);
-                        fs.unlinkSync(filePath);
-                        console.log(`  ✓ 已删除本地文件: ${fileName}`);
-                    } catch (e) {
-                        console.log(`  ✗ 上传失败: ${fileName} - ${e.message}`);
-                    }
-                }
-            } else {
-                failCount++;
-                console.log(`  ✗ 注册失败，未生成 token 文件`);
-            }
-        }
-        
-        console.log('\n' + '='.repeat(60));
-        console.log('批量注册完成');
-        console.log('='.repeat(60));
-        console.log(`成功: ${successCount} 个, 失败: ${failCount} 个`);
-        return;
-    }
 
     while (true) {
         round++;
@@ -720,78 +689,41 @@ async function main() {
         console.log(`第 ${round} 轮维护`);
         console.log('='.repeat(60));
 
-        // 1. 检测并删除失效账号，获取当前有效数量
-        const validCount = await checkAndCleanAccounts();
-        console.log(`\n当前有效 codex 账号: ${validCount} 个，阈值: ${MIN_ACCOUNTS}`);
+        // 根据注册模式决定是否需要检测账号
+        let needCount = 0;
+        let validCount = 0;
         
-        // 2. 计算需要补充的数量
-        const needCount = MIN_ACCOUNTS - validCount;
-        
-        if (needCount <= 0) {
-            // 账号充足，休眠 1 分钟后继续检测
-            console.log(`\n账号充足 (>= ${MIN_ACCOUNTS})，休眠 60 秒后继续检测...`);
-            await new Promise(r => setTimeout(r, SLEEP_DURATION));
-            continue;
-        }
-        
-        console.log(`\n需要补充 ${needCount} 个账号...`);
-        
-        // 3. 先检查本地是否有 token 文件可上传
-        const tokenFiles = scanTokenFiles();
-        let uploadedFromLocal = false;
-        
-        if (tokenFiles.length > 0) {
-            console.log(`\n上传 1 个本地 token 文件...`);
-            const filePath = tokenFiles[0];
-            const fileName = path.basename(filePath);
-            try {
-                await uploadFile(filePath);
-                console.log(`  ✓ 上传成功: ${fileName}`);
-                fs.unlinkSync(filePath);
-                console.log(`  ✓ 已删除本地文件: ${fileName}`);
-                uploadedFromLocal = true;
-            } catch (e) {
-                console.log(`  ✗ 上传失败: ${fileName} - ${e.message}`);
+        if (REGISTER_COUNT === undefined) {
+            // 未指定 --register-count，默认注册 1 个
+            needCount = 1;
+            console.log(`\n默认模式: 注册 1 个账号`);
+        } else if (REGISTER_COUNT === 0) {
+            // --register-count 0，补充不足数量
+            validCount = await checkAndCleanAccounts();
+            console.log(`\n当前有效 codex 账号: ${validCount} 个，阈值: ${MIN_ACCOUNTS}`);
+            needCount = MIN_ACCOUNTS - validCount;
+            if (needCount <= 0) {
+                console.log(`\n账号充足 (>= ${MIN_ACCOUNTS})，无需补充`);
+                console.log('\n' + '='.repeat(60));
+                console.log('维护完成');
+                console.log('='.repeat(60));
+                break;
             }
+            console.log(`\n需要补充 ${needCount} 个账号...`);
+        } else {
+            // --register-count N (N > 0)，批量注册 N 个
+            needCount = REGISTER_COUNT;
+            console.log(`\n批量注册模式: 注册 ${needCount} 个账号`);
         }
         
-        // 4. 如果没有本地文件可上传，尝试注册一次
-        if (!uploadedFromLocal) {
-            console.log(`\n尝试注册 1 个账号...`);
-            
-            // 记录注册前的 token 文件快照
-            const beforeSnap = snapshotTokenFiles();
-            
-            await runRegisterScript();
-            
-            // 检查是否生成新 token 文件
-            const afterSnap = snapshotTokenFiles();
-            const newTokenFiles = diffTokenFiles(beforeSnap, afterSnap);
-            
-            if (newTokenFiles.length > 0) {
-                console.log(`  ✓ 注册成功，生成 ${newTokenFiles.length} 个 token 文件`);
-                
-                // 上传并删除
-                for (const filePath of newTokenFiles) {
-                    const fileName = path.basename(filePath);
-                    try {
-                        await uploadFile(filePath);
-                        console.log(`  ✓ 上传新账号: ${fileName}`);
-                        fs.unlinkSync(filePath);
-                        console.log(`  ✓ 已删除本地文件: ${fileName}`);
-                    } catch (e) {
-                        console.log(`  ✗ 上传失败: ${fileName} - ${e.message}`);
-                    }
-                }
-            } else {
-                console.log(`  ✗ 注册失败，未生成 token 文件`);
-            }
-        }
+        // 执行注册
+        const successCount = await registerAccounts(needCount);
         
-        // 注册成功或失败后，停止运行
+        // 注册完成后退出
         console.log('\n' + '='.repeat(60));
         console.log('维护完成');
         console.log('='.repeat(60));
+        console.log(`成功注册: ${successCount} 个账号`);
         break;
     }
 }
