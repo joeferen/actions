@@ -499,13 +499,13 @@ def poll_verification_code(
                 
                 # 从邮件内容中提取验证码
                 # 优先检查 body，然后检查 html
-                                    for text in [body, html, subject]:
-                                    m = re.search(regex, text)
-                                    if m:
-                                        code = m.group(1)
-                                        if code not in used:
-                                            used.add(code)
-                                            return code
+                for text in [body, html, subject]:
+                    m = re.search(regex, text)
+                    if m:
+                        code = m.group(1)
+                        if code not in used:
+                            used.add(code)
+                            return code
         except Exception as e:
             log.warning(f"    TempMail API 查询失败: {e}")
 
