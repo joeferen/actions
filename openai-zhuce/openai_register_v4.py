@@ -475,8 +475,6 @@ def poll_verification_code(
     intervals = [3, 4, 5, 6, 8, 10]
     idx = 0
 
-    log.info(f"    📧 等待验证码 ({email})...")
-
     while time.time() - start < timeout:
         try:
             data = get_tempmail_emails(inbox_token, proxies)
@@ -501,16 +499,13 @@ def poll_verification_code(
                 
                 # 从邮件内容中提取验证码
                 # 优先检查 body，然后检查 html
-                for text in [body, html, subject]:
-                    m = re.search(regex, text)
-                    if m:
-                        code = m.group(1)
-                        if code not in used:
-                            used.add(code)
-                            elapsed = int(time.time() - start)
-                            log.info(f"    ✅ 验证码: {code} (耗时 {elapsed}s)")
-                            return code
-
+                                    for text in [body, html, subject]:
+                                    m = re.search(regex, text)
+                                    if m:
+                                        code = m.group(1)
+                                        if code not in used:
+                                            used.add(code)
+                                            return code
         except Exception as e:
             log.warning(f"    TempMail API 查询失败: {e}")
 
@@ -520,7 +515,6 @@ def poll_verification_code(
             try:
                 resend_fn()
                 last_resend = elapsed_now
-                log.info("    🔄 已重发 OTP")
             except Exception:
                 pass
 
@@ -717,14 +711,13 @@ def build_sentinel_token(device_id: str, user_agent: str, flow: str = "authorize
     if HAS_SENTINEL_POW:
         try:
             pow_token = build_sentinel_pow_token(user_agent)
-            log.info(f"      PoW token 已生成")
             body = json.dumps({
                 "p": pow_token,
                 "id": device_id,
                 "flow": flow,
             }, separators=(",", ":"))
         except SentinelPOWError as e:
-            log.warning(f"PoW 求解失败，使用空 PoW: {e}")
+            log.warning(f"PoW 求解失败: {e}")
             body = f'{{"p":"","id":"{device_id}","flow":"{flow}"}}'
     else:
         body = f'{{"p":"","id":"{device_id}","flow":"{flow}"}}'
@@ -794,7 +787,7 @@ class RegSession:
         
         # 记录信息
         platform = get_browser_platform(self.profile)
-        log.info(f"    🎭 浏览器指纹: {self.profile} | 平台: {platform}")
+        log.debug(f"浏览器: {self.profile} | {platform}")
 
     def get(self, url: str, **kwargs) -> Any:
         return self._session.get(url, timeout=30, **kwargs)
@@ -864,26 +857,19 @@ def register_account(
     with RegSession(proxies) as s:
         # --- 1. 发起 OAuth ---
         oauth = generate_oauth_url()
-        log.info(f"  [1] 发起 OAuth...")
         resp = s.get(oauth.auth_url)
-        log.info(f"      状态: {resp.status_code}")
 
         device_id = s.get_cookie("oai-did") or ""
-        if device_id:
-            log.info(f"      设备ID: {device_id[:16]}...")
 
         human_sleep("read")  # 页面加载后阅读
 
         # --- 2. 获取 Sentinel (功能 1: 真实 PoW) ---
-        log.info(f"  [2] 求解 Sentinel PoW...")
         ua = s._session.headers.get("User-Agent", "Mozilla/5.0")
         sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
-        log.info(f"      Sentinel token OK")
 
         human_sleep("think")  # 思考时间
 
         # --- 3. 提交邮箱 ---
-        log.info(f"  [3] 提交邮箱: {email}")
         signup_resp = s.post_json(
             "https://auth.openai.com/api/accounts/authorize/continue",
             {"username": {"value": email, "kind": "email"}, "screen_hint": "signup"},
@@ -903,8 +889,6 @@ def register_account(
             step3_data = {}
             page_type = ""
 
-        log.info(f"      页面类型: {page_type}")
-
         # 已注册账号判断
         is_existing_account = (page_type == "email_otp_verification")
 
@@ -914,11 +898,10 @@ def register_account(
 
         if is_existing_account:
             # 已注册账号：OTP 已自动发送
-            log.info(f"  [4] 检测到已注册账号，OTP 已自动发送")
+            log.info(f"  检测到已注册账号")
             otp_sent_at = time.time()
         else:
             # --- 4. 设置密码 ---
-            log.info(f"  [4] 设置密码...")
             pwd_resp = s.post_json(
                 "https://auth.openai.com/api/accounts/user/register",
                 {"password": openai_password, "username": email},
@@ -929,12 +912,10 @@ def register_account(
             )
             if pwd_resp.status_code < 200 or pwd_resp.status_code >= 300:
                 raise RuntimeError(f"设置密码失败: {pwd_resp.status_code} {pwd_resp.text[:300]}")
-            log.info(f"      密码已设置")
 
             # --- 5. 发送 OTP ---
             human_sleep("click")  # 点击发送按钮
             otp_sent_at = time.time()
-            log.info(f"  [5] 发送 OTP...")
             otp_resp = s.post_json(
                 "https://auth.openai.com/api/accounts/email-otp/send",
                 {},
@@ -942,7 +923,6 @@ def register_account(
             )
             if otp_resp.status_code < 200 or otp_resp.status_code >= 300:
                 raise RuntimeError(f"发送 OTP 失败: {otp_resp.status_code} {otp_resp.text[:300]}")
-            log.info(f"      验证码已发送")
 
         # --- 6. 获取并验证 OTP (功能 5: 支持重发) ---
         def _resend():
@@ -963,7 +943,6 @@ def register_account(
         human_sleep("type_code")  # 模拟输入验证码的时间
 
         # --- 7. 验证 OTP ---
-        log.info(f"  [7] 验证 OTP: {code}")
         # 获取 email_otp_validate 的 sentinel
         otp_sentinel = get_sentinel_header(device_id, ua, "email_otp_validate", proxies)
         verify_resp = s.post_json(
@@ -976,17 +955,13 @@ def register_account(
         )
         if verify_resp.status_code < 200 or verify_resp.status_code >= 300:
             raise RuntimeError(f"OTP 验证失败: {verify_resp.status_code} {verify_resp.text[:300]}")
-        log.info(f"      OK")
 
         human_sleep("network")  # 等待网络响应
 
         # --- 8. 创建账号 (功能 3: 随机姓名/生日) ---
-        if is_existing_account:
-            log.info(f"  [8] 跳过创建账号（已存在）")
-        else:
+        if not is_existing_account:
             name = random_name()
             birthday = random_birthday()
-            log.info(f"  [8] 创建账号: {name}, {birthday}")
             create_resp = s.post_json(
                 "https://auth.openai.com/api/accounts/create_account",
                 {"name": name, "birthdate": birthday},
@@ -994,7 +969,6 @@ def register_account(
             )
             if create_resp.status_code < 200 or create_resp.status_code >= 300:
                 raise RuntimeError(f"创建账号失败: {create_resp.status_code} {create_resp.text[:300]}")
-            log.info(f"      OK")
 
             # 检查是否需要手机验证
             try:
@@ -1004,7 +978,7 @@ def register_account(
                 create_page_type = ""
 
             if create_page_type == "add_phone":
-                log.info(f"      需要手机验证，尝试密码登录绕过...")
+                log.info("  需要手机验证，尝试密码登录绕过...")
                 return _login_for_token(email, openai_password, inbox_token, proxies)
 
         # 新注册账号需要重新登录 (功能 2)
@@ -1015,7 +989,6 @@ def register_account(
             return _complete_token_exchange(s, oauth, email, name, proxies)
 
     # --- 新注册账号：重新发起登录流程 ---
-    log.info(f"  [8.5] 注册完成，重新发起登录流程...")
     human_sleep("think")  # 思考时间
 
     return _relogin_for_token(email, openai_password, inbox_token, proxies, codes)
@@ -1033,26 +1006,19 @@ def _relogin_for_token(
 
     with RegSession(proxies) as s:
         oauth = generate_oauth_url()
-        log.info(f"  [8.5a] 重新发起 OAuth (登录)...")
-        resp = s.get(oauth.auth_url)
-        log.info(f"         状态: {resp.status_code}")
+        s.get(oauth.auth_url)
 
         device_id = s.get_cookie("oai-did") or ""
-        if device_id:
-            log.info(f"         设备ID: {device_id[:16]}...")
 
         human_sleep("read")  # 页面加载后阅读
 
         # Sentinel
-        log.info(f"  [8.5b] 重新求解 Sentinel PoW...")
         ua = s._session.headers.get("User-Agent", "Mozilla/5.0")
         sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
-        log.info(f"         Sentinel token OK")
 
         human_sleep("think")  # 思考时间
 
         # 提交邮箱
-        log.info(f"  [8.5c] 提交邮箱 (登录): {email}")
         login_resp = s.post_json(
             "https://auth.openai.com/api/accounts/authorize/continue",
             {"username": {"value": email, "kind": "email"}, "screen_hint": "login"},
@@ -1069,8 +1035,6 @@ def _relogin_for_token(
         except Exception:
             login_page_type = ""
 
-        log.info(f"         页面类型: {login_page_type}")
-
         if login_page_type != "login_password":
             raise RuntimeError(f"重新登录未进入密码页面: {login_page_type}")
 
@@ -1078,7 +1042,6 @@ def _relogin_for_token(
 
         # 提交密码
         pwd_sentinel = get_sentinel_header(device_id, ua, "password_verify", proxies)
-        log.info(f"  [8.5d] 提交登录密码...")
         pwd_resp = s.post_json(
             "https://auth.openai.com/api/accounts/password/verify",
             {"password": password},
@@ -1095,13 +1058,10 @@ def _relogin_for_token(
         except Exception:
             pwd_page_type = ""
 
-        log.info(f"         页面类型: {pwd_page_type}")
-
         if pwd_page_type != "email_otp_verification":
             raise RuntimeError(f"重新登录未进入验证码页面: {pwd_page_type}")
 
         otp_sent_at = time.time()
-        log.info(f"         密码校验通过，等待验证码...")
 
         human_sleep("network")  # 网络响应等待
 
@@ -1121,7 +1081,6 @@ def _relogin_for_token(
             otp_sent_at=otp_sent_at,
         )
 
-        log.info(f"  [8.5f] 验证登录 OTP: {code}")
         otp_sentinel = get_sentinel_header(device_id, ua, "email_otp_validate", proxies)
         verify_resp = s.post_json(
             "https://auth.openai.com/api/accounts/email-otp/validate",
@@ -1133,8 +1092,6 @@ def _relogin_for_token(
         )
         if verify_resp.status_code < 200 or verify_resp.status_code >= 300:
             raise RuntimeError(f"重新登录 OTP 验证失败: {verify_resp.status_code}")
-
-        log.info(f"         OK")
 
         human_sleep("network")  # 网络响应等待
 
@@ -1148,12 +1105,11 @@ def _login_for_token(
     proxies: Any = None,
 ) -> dict:
     """通过账号密码登录获取 token（绕过手机验证）"""
-    log.info("[*] ===== 尝试密码登录获取 token =====")
+    log.info("  尝试密码登录...")
 
     with RegSession(proxies) as s:
         oauth = generate_oauth_url()
         
-        log.info("[*] 初始化 OAuth 会话...")
         s.get(oauth.auth_url)
         device_id = s.get_cookie("oai-did") or ""
 
@@ -1161,7 +1117,6 @@ def _login_for_token(
         sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
 
         # 提交用户名
-        log.info("[*] 提交用户名...")
         login_resp = s.post_json(
             "https://auth.openai.com/api/accounts/authorize/continue",
             {"username": {"value": email, "kind": "email"}},
@@ -1175,7 +1130,6 @@ def _login_for_token(
             raise RuntimeError(f"用户名提交失败: {login_resp.status_code}")
 
         # 提交密码
-        log.info("[*] 提交密码...")
         pwd_sentinel = get_sentinel_header(device_id, ua, "password_verify", proxies)
         pwd_resp = s.post_json(
             "https://auth.openai.com/api/accounts/password/verify",
@@ -1197,8 +1151,6 @@ def _login_for_token(
             login_continue_url = ""
             login_page_type = ""
 
-        log.info(f"[*] 页面类型: {login_page_type}")
-
         # 检查是否需要邮箱验证
         need_login_otp = (
             "email_otp" in login_page_type
@@ -1206,7 +1158,6 @@ def _login_for_token(
         )
 
         if need_login_otp:
-            log.info("[*] 需要邮箱验证...")
             human_sleep("network")  # 等待验证码发送
             
             def _resend():
@@ -1221,7 +1172,6 @@ def _login_for_token(
             if not code:
                 raise RuntimeError("未获取到登录验证码")
 
-            log.info(f"[*] 验证码: {code}")
             otp_sentinel = get_sentinel_header(device_id, ua, "email_otp_validate", proxies)
             otp_resp = s.post_json(
                 "https://auth.openai.com/api/accounts/email-otp/validate",
@@ -1234,8 +1184,6 @@ def _login_for_token(
 
             if otp_resp.status_code < 200 or otp_resp.status_code >= 300:
                 raise RuntimeError(f"验证码校验失败: {otp_resp.status_code}")
-
-            log.info("[*] 验证码验证成功")
 
         return _complete_token_exchange(s, oauth, email, "", proxies)
 
@@ -1264,7 +1212,6 @@ def _complete_token_exchange(
     if not workspace_id:
         raise RuntimeError("未找到 workspace_id")
 
-    log.info(f"  [9] 选择 Workspace: {workspace_id[:20]}...")
     select_resp = s.post_json(
         "https://auth.openai.com/api/accounts/workspace/select",
         {"workspace_id": workspace_id},
@@ -1279,7 +1226,6 @@ def _complete_token_exchange(
         raise RuntimeError("未获取到 continue_url")
 
     # --- 跟随重定向获取 token ---
-    log.info(f"  [10] 跟随重定向获取 Token...")
     callback_url = s.follow_redirects(continue_url)
     if not callback_url:
         raise RuntimeError("重定向失败，未获取到回调 URL")
@@ -1291,7 +1237,7 @@ def _complete_token_exchange(
         expected_state=oauth.state,
     )
 
-    log.info(f"  🎉 注册成功！")
+    log.info("  注册成功！")
     
     return {
         "token": token_json,
@@ -1329,11 +1275,11 @@ def run_one(proxy: Optional[str], domain: Optional[str] = None, domain_index: in
         )
         loc_match = re.search(r"^loc=(.+)$", trace_resp.text, re.MULTILINE)
         loc = loc_match.group(1) if loc_match else None
-        log.info(f"[*] 当前 IP 所在地: {loc}")
+        log.debug(f"IP: {loc}")
         if loc in ("CN", "HK"):
             raise RuntimeError("IP 所在地不支持，请检查代理")
     except Exception as e:
-        log.error(f"[Error] 网络连接检查失败: {e}")
+        log.error(f"网络检查失败: {e}")
         return None
 
     # 创建 TempMail 邮箱
@@ -1346,18 +1292,17 @@ def run_one(proxy: Optional[str], domain: Optional[str] = None, domain_index: in
         inbox_token = inbox.token
 
         if not email or not inbox_token:
-            log.error("[Error] 创建邮箱失败")
+            log.error("创建邮箱失败")
             return None
 
-        log.info(f"[*] 成功创建 TempMail: {email}")
+        log.info(f"邮箱: {email}")
 
     except Exception as e:
-        log.error(f"[Error] 邮箱创建失败: {e}")
+        log.error(f"邮箱创建失败: {e}")
         return None
 
     # 生成 OpenAI 密码
     openai_password = _generate_password()
-    log.info(f"[*] OpenAI 密码: {openai_password[:4]}****")
 
     # 执行注册
     try:
@@ -1365,7 +1310,7 @@ def run_one(proxy: Optional[str], domain: Optional[str] = None, domain_index: in
         result["openai_password"] = openai_password
         return result
     except Exception as e:
-        log.error(f"[Error] 注册失败: {e}")
+        log.error(f"注册失败: {e}")
         return {"email": email, "openai_password": openai_password, "error": str(e)}
 
 
@@ -1390,7 +1335,7 @@ def save_result(result: dict):
     with open(file_name, "w", encoding="utf-8") as f:
         f.write(token_json)
 
-    log.info(f"[*] Token 已保存至: {file_name}")
+    log.info(f"Token 已保存: {file_name}")
 
     # 保存账号信息
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1417,12 +1362,12 @@ def main():
     parser.add_argument("--save-account", action="store_true", help="保存账号密码")
     args = parser.parse_args()
 
-    log.info("=" * 55)
-    log.info(" OpenAI 自动注册 V4 - TempMail.lol 版")
-    log.info("=" * 55)
+    log.info("=" * 50)
+    log.info(" OpenAI 自动注册 V4 - TempMail.lol")
+    log.info("=" * 50)
 
     if not HAS_SENTINEL_POW:
-        log.warning("⚠️ sentinel_pow 模块未安装，将使用空 PoW（可能被风控）")
+        log.warning("sentinel_pow 模块未安装，将使用空 PoW")
 
     proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
 
@@ -1444,9 +1389,7 @@ def main():
             time.sleep(delay)
         
         start_t = time.time()
-        log.info(f"\n{'─'*50}")
-        log.info(f"[{idx}/{total}] 开始注册...")
-        log.info(f"{'─'*50}")
+        log.info(f"\n[{idx}/{total}] 开始注册...")
 
         result = run_one(args.proxy, args.domain, args.domain_index)
         
@@ -1455,11 +1398,11 @@ def main():
             with lock:
                 stats["ok"] += 1
             elapsed = round(time.time() - start_t, 1)
-            log.info(f"  ✅ 成功 ({elapsed}s)")
+            log.info(f"成功 ({elapsed}s)")
         else:
             with lock:
                 stats["fail"] += 1
-            log.info(f"  ❌ 失败")
+            log.info("失败")
 
     if workers <= 1:
         # 串行
@@ -1467,7 +1410,7 @@ def main():
             _do_one(i)
             if i < total:
                 wait = random.randint(args.sleep_min, args.sleep_max)
-                log.info(f"[*] 休息 {wait} 秒...")
+                log.info(f"等待 {wait} 秒...")
                 time.sleep(wait)
     else:
         # 并行
@@ -1485,12 +1428,9 @@ def main():
                 except Exception as e:
                     log.error(f"线程异常: {e}")
 
-    log.info(f"\n{'='*55}")
-    log.info(f"  注册完成")
-    log.info(f"{'='*55}")
-    log.info(f"  ✅ 成功: {stats['ok']}")
-    log.info(f"  ❌ 失败: {stats['fail']}")
-    log.info(f"  📁 结果: {TOKENS_DIR}")
+    log.info(f"\n{'='*50}")
+    log.info(f"注册完成 | 成功: {stats['ok']} | 失败: {stats['fail']}")
+    log.info(f"结果目录: {TOKENS_DIR}")
 
 
 if __name__ == "__main__":
