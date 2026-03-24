@@ -46,7 +46,7 @@ const { spawn } = require('child_process');
 // 默认配置
 const DEFAULT_MIN_ACCOUNTS = 100;
 const DEFAULT_DOMAIN_INDEX = 0;
-const DEFAULT_REGISTER_TIMEOUT = 1800; // 注册循环总时长限制（秒）
+const DEFAULT_REGISTER_TIMEOUT = 18000; // 注册循环总时长限制（秒）
 const DEFAULT_REGISTER_SCRIPT = 'openai_register_v2.py';
 const DEFAULT_BASE_URL = '';
 const DEFAULT_TOKEN = '';
@@ -529,7 +529,7 @@ async function registerAccounts(needCount) {
             break;
         }
         
-        console.log(`\n--- 注册第 ${successCount + 1}/${needCount} 个账号 (剩余时间: ${Math.round((REGISTER_TIMEOUT - elapsed) / 1000)}秒) ---`);
+        console.log(`\n--- 注册第 ${successCount + 1}/${needCount} 个账号 (成功: ${successCount}, 失败: ${failCount}, 剩余时间: ${Math.round((REGISTER_TIMEOUT - elapsed) / 1000)}秒) ---`);
         
         // 记录注册前的 token 文件快照（用于识别新增/覆盖）
         const beforeSnap = snapshotTokenFiles();
@@ -570,7 +570,7 @@ async function registerAccounts(needCount) {
         }
     }
     
-    console.log(`\n注册完成: 成功 ${successCount}/${needCount}, 失败重试 ${failCount} 次`);
+    console.log(`\n注册完成: 成功 ${successCount} 个, 失败 ${failCount} 个`);
 
     // 注册完毕后兜底：将本轮注册产生但尚未上传成功的 token 文件再尝试上传并删除
     const pending = Array.from(generatedTokenFiles.values()).filter(p => {
@@ -595,7 +595,7 @@ async function registerAccounts(needCount) {
             }
         }
     }
-    return successCount;
+    return { successCount, failCount };
 }
 
 // 检测并删除失效账号（返回当前有效 codex 账号数量）
@@ -717,13 +717,13 @@ async function main() {
         }
         
         // 执行注册
-        const successCount = await registerAccounts(needCount);
+        const { successCount, failCount } = await registerAccounts(needCount);
         
         // 注册完成后退出
         console.log('\n' + '='.repeat(60));
         console.log('维护完成');
         console.log('='.repeat(60));
-        console.log(`成功注册: ${successCount} 个账号`);
+        console.log(`成功: ${successCount} 个, 失败: ${failCount} 个`);
         break;
     }
 }
