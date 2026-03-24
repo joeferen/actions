@@ -81,7 +81,7 @@ jobs:
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
       
       - name: Re-trigger workflow
-        if: always()
+        if: steps.maintenance.outcome == 'success' || steps.maintenance.outcome == 'failure'
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
