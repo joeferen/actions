@@ -2,7 +2,7 @@
  * Node.js 脚本：检测 codex 提供商账号的 401 状态并删除失效账号
  * 
  * 使用方法：
- *   node codex_maintenance.js <min_accounts> [quota_threshold_percent] [base_url] [token] [domain_index] [register_timeout] [register_script] [concurrency]
+ *   node codex_maintenance.js <min_accounts> [quota_threshold_percent] [base_url] [token] [domain_index] [register_timeout] [register_script] [concurrency] [--register-count N]
  * 
  * 参数：
  *   min_accounts     - 账号数量阈值，低于此值会上传 token*.json 文件并注册新账号
@@ -13,6 +13,25 @@
  *   register_timeout - 注册循环总时长限制（秒），超时后停止注册
  *   register_script  - 注册脚本名称（如 openai_register_v2.py）
  *   concurrency      - 并发数，默认 50
+ *   --register-count N - 直接注册 N 个账号（跳过账号检测，无论成功失败都继续）
+ * 
+ * 运行示例：
+ *   # 基本用法：设置账号阈值为 100
+ *   node codex_maintenance.js 100
+ * 
+ *   # 设置账号阈值 150，额度删除阈值 10%
+ *   node codex_maintenance.js 150 10
+ * 
+ *   # 完整参数：指定服务器地址和令牌
+ *   node codex_maintenance.js 100 20 https://api.example.com your_token 0 1800 openai_register_v2.py 50
+ * 
+ *   # 使用环境变量设置服务器地址和令牌
+ *   set BASE_URL=https://api.example.com
+ *   set TOKEN=your_token
+ *   node codex_maintenance.js 100
+ * 
+ *   # 直接注册 10 个账号（跳过账号检测）
+ *   node codex_maintenance.js 100 20 https://api.example.com your_token --register-count 10
  */
 
 const https = require('https');
@@ -38,19 +57,30 @@ const FINAL_ACCOUNT_NOTIFY_THRESHOLD_RATIO = 0.9;
 // 解析命令行参数
 const args = process.argv.slice(2);
 
-const MIN_ACCOUNTS = parseInt(args[0]) || DEFAULT_MIN_ACCOUNTS;
+// 解析 --register-count 参数
+let REGISTER_COUNT = 0;
+let positionalArgs = [];
+for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--register-count' && args[i + 1]) {
+        REGISTER_COUNT = parseInt(args[++i]) || 0;
+    } else {
+        positionalArgs.push(args[i]);
+    }
+}
 
-const QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT = (args[1] !== undefined && args[1] !== null && String(args[1]).trim() !== '')
-    ? Math.max(0, Math.min(100, parseFloat(String(args[1]).trim().replace(/%$/, ''))))
+const MIN_ACCOUNTS = parseInt(positionalArgs[0]) || DEFAULT_MIN_ACCOUNTS;
+
+const QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT = (positionalArgs[1] !== undefined && positionalArgs[1] !== null && String(positionalArgs[1]).trim() !== '')
+    ? Math.max(0, Math.min(100, parseFloat(String(positionalArgs[1]).trim().replace(/%$/, ''))))
     : DEFAULT_QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT;
 
 // BASE_URL 和 TOKEN 优先从环境变量读取
-const BASE_URL = normalizeUrl(args[2] || process.env.BASE_URL || DEFAULT_BASE_URL);
-const TOKEN = args[3] || process.env.TOKEN || DEFAULT_TOKEN;
-const DOMAIN_INDEX = parseInt(args[4]) || DEFAULT_DOMAIN_INDEX;
-const REGISTER_TIMEOUT = parseInt(args[5]) * 1000 || DEFAULT_REGISTER_TIMEOUT * 1000;
-const REGISTER_SCRIPT = args[6] || DEFAULT_REGISTER_SCRIPT;
-const CONCURRENCY = parseInt(args[7]) || DEFAULT_CONCURRENCY;
+const BASE_URL = normalizeUrl(positionalArgs[2] || process.env.BASE_URL || DEFAULT_BASE_URL);
+const TOKEN = positionalArgs[3] || process.env.TOKEN || DEFAULT_TOKEN;
+const DOMAIN_INDEX = parseInt(positionalArgs[4]) || DEFAULT_DOMAIN_INDEX;
+const REGISTER_TIMEOUT = parseInt(positionalArgs[5]) * 1000 || DEFAULT_REGISTER_TIMEOUT * 1000;
+const REGISTER_SCRIPT = positionalArgs[6] || DEFAULT_REGISTER_SCRIPT;
+const CONCURRENCY = parseInt(positionalArgs[7]) || DEFAULT_CONCURRENCY;
 
 // 标准化 URL
 function normalizeUrl(url) {
@@ -635,6 +665,54 @@ async function main() {
 
     const SLEEP_DURATION = 60 * 1000; // 休眠 1 分钟
     let round = 0;
+
+    // 如果指定了注册数量，直接批量注册
+    if (REGISTER_COUNT > 0) {
+        console.log(`\n注册模式: 批量注册 ${REGISTER_COUNT} 个账号`);
+        
+        let successCount = 0;
+        let failCount = 0;
+        
+        for (let i = 1; i <= REGISTER_COUNT; i++) {
+            console.log(`\n--- 注册第 ${i}/${REGISTER_COUNT} 个账号 ---`);
+            
+            // 记录注册前的 token 文件快照
+            const beforeSnap = snapshotTokenFiles();
+            
+            await runRegisterScript();
+            
+            // 检查是否生成新 token 文件
+            const afterSnap = snapshotTokenFiles();
+            const newTokenFiles = diffTokenFiles(beforeSnap, afterSnap);
+            
+            if (newTokenFiles.length > 0) {
+                successCount++;
+                console.log(`  ✓ 注册成功，生成 ${newTokenFiles.length} 个 token 文件`);
+                
+                // 上传并删除
+                for (const filePath of newTokenFiles) {
+                    const fileName = path.basename(filePath);
+                    try {
+                        await uploadFile(filePath);
+                        console.log(`  ✓ 上传新账号: ${fileName}`);
+                        fs.unlinkSync(filePath);
+                        console.log(`  ✓ 已删除本地文件: ${fileName}`);
+                    } catch (e) {
+                        console.log(`  ✗ 上传失败: ${fileName} - ${e.message}`);
+                    }
+                }
+            } else {
+                failCount++;
+                console.log(`  ✗ 注册失败，未生成 token 文件`);
+            }
+        }
+        
+        console.log('\n' + '='.repeat(60));
+        console.log('批量注册完成');
+        console.log('='.repeat(60));
+        console.log(`成功: ${successCount} 个, 失败: ${failCount} 个`);
+        return;
+    }
 
     while (true) {
         round++;
