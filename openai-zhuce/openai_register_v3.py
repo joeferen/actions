@@ -28,35 +28,21 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from curl_cffi import requests
 
 # 尝试导入 sentinel_pow 模块
-# 1. 先尝试从系统安装的 sentinel_pow 导入
-# 2. 再尝试从本地 openai-zhuce/sentinel_pow 导入
-HAS_SENTINEL_POW = False
 try:
     from sentinel_pow import build_sentinel_pow_token, SentinelPOWError
     HAS_SENTINEL_POW = True
 except ImportError:
-    # 尝试从本地目录导入
-    try:
-        # 添加本地目录到 sys.path
-        _local_sentinel_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sentinel_pow.py")
-        if os.path.exists(_local_sentinel_path):
-            import importlib.util
-            _spec = importlib.util.spec_from_file_location("sentinel_pow", _local_sentinel_path)
-            _sentinel_module = importlib.util.module_from_spec(_spec)
-            _spec.loader.exec_module(_sentinel_module)
-            build_sentinel_pow_token = _sentinel_module.build_sentinel_pow_token
-            SentinelPOWError = _sentinel_module.SentinelPOWError
-            HAS_SENTINEL_POW = True
-    except Exception:
-        pass
-
-if not HAS_SENTINEL_POW:
+    HAS_SENTINEL_POW = False
     print("[Warn] sentinel_pow 模块未安装，将使用空 PoW")
+
+# ==========================================
+# 脚本目录（提前定义，供后续使用）
+# ==========================================
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ==========================================
 # 日志配置
 # ==========================================
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "openai_register_v3.log")
 
 def _setup_logger():
