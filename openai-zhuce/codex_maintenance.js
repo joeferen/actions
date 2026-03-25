@@ -61,15 +61,15 @@ const FINAL_ACCOUNT_NOTIFY_THRESHOLD_RATIO = 0.9;
 const args = process.argv.slice(2);
 
 // 解析 --register-count 参数
-// undefined 表示未指定，0 表示显式传入 0，> 0 表示显式传入正数
-let REGISTER_COUNT = undefined;
+// 默认值为 1；0 表示补充不足数量；> 1 表示每轮直接注册指定数量
+let REGISTER_COUNT = 1;
 let positionalArgs = [];
 for (let i = 0; i < args.length; i++) {
     if (args[i] === '--register-count' && i + 1 < args.length) {
         const val = args[++i];
         REGISTER_COUNT = parseInt(val);
         if (isNaN(REGISTER_COUNT)) {
-            REGISTER_COUNT = undefined;
+            REGISTER_COUNT = 1;
         }
     } else {
         positionalArgs.push(args[i]);
@@ -671,10 +671,10 @@ async function main() {
     console.log(`额度删除阈值: ${QUOTA_REMAINING_DELETE_THRESHOLD_PERCENT}%`);
     
     // 显示注册模式
-    if (REGISTER_COUNT === undefined) {
-        console.log(`注册模式: 默认注册 1 个账号`);
-    } else if (REGISTER_COUNT === 0) {
+    if (REGISTER_COUNT === 0) {
         console.log(`注册模式: 补充不足数量`);
+    } else if (REGISTER_COUNT === 1) {
+        console.log(`注册模式: 维护时默认注册 1 个账号`);
     } else {
         console.log(`注册模式: 批量注册 ${REGISTER_COUNT} 个账号`);
     }
@@ -693,10 +693,10 @@ async function main() {
         let needCount = 0;
         let validCount = 0;
         
-        if (REGISTER_COUNT === undefined) {
-            // 未指定 --register-count，默认注册 1 个
+        if (REGISTER_COUNT === 1) {
+            // 默认模式：每轮维护注册 1 个
             needCount = 1;
-            console.log(`\n默认模式: 注册 1 个账号`);
+            console.log(`\n默认模式: 本轮维护注册 1 个账号`);
         } else if (REGISTER_COUNT === 0) {
             // --register-count 0，补充不足数量
             validCount = await checkAndCleanAccounts();
@@ -711,9 +711,9 @@ async function main() {
             }
             console.log(`\n需要补充 ${needCount} 个账号...`);
         } else {
-            // --register-count N (N > 0)，批量注册 N 个
+            // --register-count N (N > 1)，每轮维护批量注册 N 个
             needCount = REGISTER_COUNT;
-            console.log(`\n批量注册模式: 注册 ${needCount} 个账号`);
+            console.log(`\n批量注册模式: 本轮维护注册 ${needCount} 个账号`);
         }
         
         // 执行注册
