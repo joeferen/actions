@@ -512,7 +512,7 @@ async function registerAccounts(needCount) {
     let failCount = 0;
     let consecutiveFails = 0;  // 连续失败计数
     const MAX_CONSECUTIVE_FAILS = 5;  // 最大连续失败次数
-    const REGISTER_INTERVAL = 15 * 1000; // 每次注册后休息 15 秒
+    const REGISTER_INTERVAL = 1 * 1000; // 每次注册后休息 x 秒
     const startTime = Date.now();
     const generatedTokenFiles = new Map(); // name -> filePath（本轮注册产生/覆盖的 token 文件）
     
