@@ -512,10 +512,12 @@ async function registerAccounts(needCount) {
     let failCount = 0;
     let consecutiveFails = 0;  // 连续失败计数
     const MAX_CONSECUTIVE_FAILS = 5;  // 最大连续失败次数
+    const REGISTER_INTERVAL = 15 * 1000; // 每次注册后休息 15 秒
     const startTime = Date.now();
     const generatedTokenFiles = new Map(); // name -> filePath（本轮注册产生/覆盖的 token 文件）
     
-    while (successCount < needCount) {
+    // 使用总数循环，不使用成功数来循环
+    while (successCount + failCount < needCount) {
         // 检查是否超时
         const elapsed = Date.now() - startTime;
         if (elapsed >= REGISTER_TIMEOUT) {
@@ -529,7 +531,8 @@ async function registerAccounts(needCount) {
             break;
         }
         
-        console.log(`\n--- 注册第 ${successCount + 1}/${needCount} 个账号 (成功: ${successCount}, 失败: ${failCount}, 剩余时间: ${Math.round((REGISTER_TIMEOUT - elapsed) / 1000)}秒) ---`);
+        const totalCount = successCount + failCount + 1;
+        console.log(`\n--- 注册第 ${totalCount}/${needCount} 次 (成功: ${successCount}, 失败: ${failCount}, 剩余时间: ${Math.round((REGISTER_TIMEOUT - elapsed) / 1000)}秒) ---`);
         
         // 记录注册前的 token 文件快照（用于识别新增/覆盖）
         const beforeSnap = snapshotTokenFiles();
@@ -567,6 +570,12 @@ async function registerAccounts(needCount) {
             failCount++;
             consecutiveFails++;  // 失败时增加连续失败计数
             console.log(`  ✗ 注册失败，未生成 token 文件 (连续失败 ${consecutiveFails}/${MAX_CONSECUTIVE_FAILS})`);
+        }
+        
+        // 每次注册后休息 15 秒（最后一次不休息）
+        if (successCount + failCount < needCount) {
+            console.log(`  休息 ${REGISTER_INTERVAL / 1000} 秒后继续...`);
+            await new Promise(r => setTimeout(r, REGISTER_INTERVAL));
         }
     }
     
