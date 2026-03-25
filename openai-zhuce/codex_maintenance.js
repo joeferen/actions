@@ -641,8 +641,8 @@ async function checkAndCleanAccounts() {
         }
     });
     
+    console.log(`\n删除 ${toDelete.length} 个失效账号...`);
     if (toDelete.length > 0) {
-        console.log(`\n删除 ${toDelete.length} 个失效账号...`);
         for (const acc of toDelete) {
             try {
                 await deleteAccount(acc.name);
