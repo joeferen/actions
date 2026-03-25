@@ -682,6 +682,7 @@ async function main() {
 
     const SLEEP_DURATION = 60 * 1000; // 休眠 1 分钟
     let round = 0;
+    let everRegistered = false; // 是否曾注册过账号
 
     while (true) {
         round++;
@@ -704,10 +705,18 @@ async function main() {
             needCount = MIN_ACCOUNTS - validCount;
             if (needCount <= 0) {
                 console.log(`\n账号充足 (>= ${MIN_ACCOUNTS})，无需补充`);
-                console.log('\n' + '='.repeat(60));
-                console.log('维护完成');
-                console.log('='.repeat(60));
-                break;
+                if (everRegistered) {
+                    // 曾经注册过账号，维护完成退出
+                    console.log(`曾注册过账号，维护结束`);
+                    console.log('\n' + '='.repeat(60));
+                    console.log('维护完成');
+                    console.log('='.repeat(60));
+                    break;
+                }
+                // 从未注册过账号，休息后继续循环检测
+                console.log(`从未注册过账号，${SLEEP_DURATION / 1000} 秒后继续检测...`);
+                await new Promise(r => setTimeout(r, SLEEP_DURATION));
+                continue;
             }
             console.log(`\n需要补充 ${needCount} 个账号...`);
         } else {
@@ -718,6 +727,9 @@ async function main() {
         
         // 执行注册
         const { successCount, failCount } = await registerAccounts(needCount);
+        
+        // 标记已注册过账号（无论成功还是失败，只要尝试过注册就算）
+        everRegistered = true;
         
         // 注册完成后退出
         console.log('\n' + '='.repeat(60));
