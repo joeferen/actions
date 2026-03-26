@@ -86,3 +86,18 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           event-type: run-next-v4
+        continue-on-error: true
+        id: retrigger
+      
+      - name: Wait 1 minute before retry
+        if: steps.retrigger.outcome == 'failure'
+        run: |
+          echo "等待 60 秒后重试..."
+          sleep 60
+      
+      - name: Retry re-trigger workflow
+        if: steps.retrigger.outcome == 'failure'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: run-next-v4
