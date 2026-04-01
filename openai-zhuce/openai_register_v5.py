@@ -1656,14 +1656,11 @@ async def run_concurrent(items: List, fn: Callable, concurrency: int, client: Ht
             index, result = await task
             results[index] = result
             completed += 1
-            elapsed = time.time() - start_time
-            print(f"\r进度: {completed}/{total} (在飞: {len(in_flight)}/{limit}, 总耗时: {elapsed:.1f}s)", end='', flush=True)
 
             if started < total:
                 in_flight.add(asyncio.create_task(run_one(started, items[started])))
                 started += 1
 
-    print()
     return [r for r in results if r is not None]
 
 
@@ -1833,12 +1830,10 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
     low_quota = [r for r in check_results if r.get('low_quota')]
     ok = [r for r in check_results if not r.get('invalid_401') and not r.get('low_quota') and not r.get('error')]
     elapsed_values = [r.get('elapsed_seconds') for r in check_results if isinstance(r.get('elapsed_seconds'), (int, float))]
-    total_check_elapsed = time.time() - check_start_time
 
     print(f"  - 401 失效: {len(invalid_401)} 个")
     print(f"  - 额度不足: {len(low_quota)} 个")
     print(f"  - 正常: {len(ok)} 个")
-    print(f"  - 检测总耗时: {total_check_elapsed:.1f}s")
     if elapsed_values:
         avg_elapsed = sum(elapsed_values) / len(elapsed_values)
         max_elapsed = max(elapsed_values)
@@ -1865,6 +1860,9 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
                 print(f"  ✗ 删除失败: {acc['name']}")
         except Exception as e:
             print(f"  ✗ 删除异常: {acc['name']} - {e}")
+
+    total_check_elapsed = time.time() - check_start_time
+    print(f"  - 检测总耗时: {total_check_elapsed:.1f}s")
 
     return len(ok)
 
