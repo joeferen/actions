@@ -1555,41 +1555,20 @@ async def upload_file(client: HttpClient, file_path: str, retry_count: int = 3) 
 
     for attempt in range(1, retry_count + 1):
         try:
-            parsed = urlparse(url)
-            host = parsed.hostname
-            port = parsed.port or 443
-            context = ssl.create_default_context()
-            sock = socket.create_connection((host, port), timeout=30)
-            ssock = context.wrap_socket(sock, server_hostname=host)
-
-            body = file_content.encode('utf-8')
-            request_headers = (
-                f"POST {parsed.path}?{parsed.query} HTTP/1.1\r\n"
-                f"Host: {parsed.hostname}\r\n"
-                f"Authorization: Bearer {client.token}\r\n"
-                f"Accept: application/json\r\n"
-                f"Content-Type: application/json\r\n"
-                f"Content-Length: {len(body)}\r\n"
-                f"Connection: close\r\n"
-                f"\r\n"
+            print(f"  ↗ 开始上传: {file_name} (尝试 {attempt}/{retry_count})")
+            resp = requests.post(
+                url,
+                headers={
+                    'Authorization': f'Bearer {client.token}',
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                },
+                data=file_content.encode('utf-8'),
+                impersonate="chrome",
+                timeout=30,
             )
-            ssock.sendall(request_headers.encode() + body)
-
-            response = b""
-            while True:
-                chunk = ssock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
-            ssock.close()
-
-            header_end = response.find(b'\r\n\r\n')
-            if header_end == -1:
-                return False, "Invalid response"
-
-            status_line = response[:header_end].decode('utf-8', errors='ignore').split('\r\n')[0]
-            status_code = int(status_line.split()[1])
-            response_body = response[header_end + 4:].decode('utf-8', errors='ignore')
+            status_code = resp.status_code
+            response_body = resp.text or ""
 
             if 200 <= status_code < 300:
                 try:
@@ -1606,13 +1585,16 @@ async def upload_file(client: HttpClient, file_path: str, retry_count: int = 3) 
                 except json.JSONDecodeError:
                     return True, file_name
             else:
+                err_preview = response_body[:200].replace('\n', ' ')
                 if attempt < retry_count:
+                    print(f"  ⚠ 上传响应异常: HTTP {status_code} {err_preview}")
                     time.sleep(1)
                     continue
-                return False, f"HTTP {status_code}"
+                return False, f"HTTP {status_code}: {err_preview}"
 
         except Exception as e:
             if attempt < retry_count:
+                print(f"  ⚠ 上传异常: {e}")
                 time.sleep(1)
                 continue
             return False, str(e)
@@ -1666,7 +1648,7 @@ async def run_concurrent(items: List, fn: Callable, concurrency: int, client: Ht
 
 async def register_accounts_maintenance(
     need_count: int,
-    register_timeout: int,
+    register_timeout: float,
     domain_index: int,
     domain_name: str,
     concurrency: int,
@@ -1676,7 +1658,7 @@ async def register_accounts_maintenance(
     proxy: str = None
 ) -> Tuple[int, int, bool]:
     print(f"开始注册 {need_count} 个账号...")
-    print(f"注册总时长限制: {register_timeout / 1000} 秒")
+    print(f"注册总时长限制: {register_timeout:.1f} 秒")
 
     success_count = 0
     fail_count = 0
@@ -1690,7 +1672,7 @@ async def register_accounts_maintenance(
     while success_count + fail_count < need_count:
         elapsed = int(time.time() - start_time)
         if elapsed >= register_timeout:
-            print(f"\n[Warn] 注册总时长已达 {register_timeout / 1000} 秒，停止注册")
+            print(f"\n[Warn] 注册总时长已达 {register_timeout:.1f} 秒，停止注册")
             break
 
         if consecutive_fails >= max_consecutive_fails:
@@ -1700,7 +1682,7 @@ async def register_accounts_maintenance(
 
         total_count = success_count + fail_count + 1
         remaining_time = max(0, register_timeout - elapsed)
-        print(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 剩余时间: {remaining_time / 1000}秒) ---")
+        print(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 剩余时间: {remaining_time:.1f}秒) ---")
 
         before_snap = snapshot_token_files()
 
@@ -1944,7 +1926,7 @@ async def main():
 
                 success_count, fail_count, stopped_by_consecutive_fails = await register_accounts_maintenance(
                     need_count,
-                    args.timeout * 1000,
+                    args.timeout,
                     args.domain_index,
                     args.domain,
                     args.concurrency,
