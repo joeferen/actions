@@ -25,6 +25,7 @@ OpenAI 自动注册脚本 V5 - 集成版
   --domain            指定邮箱域名（如 mail.example.com），优先级高于 --domain-index
   --mail-url          邮箱服务地址（默认 https://mailfree.smanx.xx.kg）
   --mail-token        邮箱服务授权令牌（默认 auto）
+  --timeout           脚本最大运行时长（秒，默认 18000）
 
 注册模式参数：
   --count             注册数量（默认 1）
@@ -35,12 +36,7 @@ OpenAI 自动注册脚本 V5 - 集成版
 维护模式参数：
   --min-accounts      账号数量阈值（默认 100）
   --quota-threshold   额度不足删除阈值百分比（默认 20）
-  --register-timeout  注册循环总时长限制（秒，默认 18000）
   --concurrency       检测账号并发数（默认 50）
-  --register-count    注册模式：
-                       0 = 检测账号状态，补充不足数量
-                       1 = 默认每轮注册 1 个账号
-                       N = 批量直接注册 N 个账号
   --mode              运行模式：
                        register = 仅注册
                        maintenance = 仅维护
@@ -77,7 +73,7 @@ set TARGET_TOKEN=your_token
 python openai_register_v5.py --mode maintenance --min-accounts 100
 
 # 9. 自定义参数
-python openai_register_v5.py --mode both --target-url https://api.example.com --target-token YOUR_TOKEN --quota-threshold 15 --register-timeout 3600 --concurrency 30
+python openai_register_v5.py --mode both --target-url https://api.example.com --target-token YOUR_TOKEN --quota-threshold 15 --timeout 3600 --concurrency 30
 
 ================================================================================
 """
@@ -1435,7 +1431,7 @@ async def check_account(client: HttpClient, item: dict, quota_threshold: float) 
         if chatgpt_account_id:
             payload['header']['Chatgpt-Account-Id'] = chatgpt_account_id
 
-        status, data = client.request('/v0/management/api-call', 'POST', json.dumps(payload))
+        status, data = await asyncio.to_thread(client.request, '/v0/management/api-call', 'POST', json.dumps(payload))
 
         is_401 = status == 401 or (isinstance(data, dict) and data.get('status_code') == 401)
 
@@ -1837,7 +1833,7 @@ async def main():
     parser.add_argument("--target-token", default=DEFAULT_TARGET_TOKEN, help="目标服务器认证令牌")
     parser.add_argument("--min-accounts", type=int, default=DEFAULT_MIN_ACCOUNTS, help="账号数量阈值")
     parser.add_argument("--quota-threshold", type=float, default=DEFAULT_QUOTA_THRESHOLD_PERCENT, help="额度不足删除阈值")
-    parser.add_argument("--register-timeout", type=int, default=DEFAULT_REGISTER_TIMEOUT, help="注册循环总时长限制(秒)")
+    parser.add_argument("--timeout", type=int, default=DEFAULT_REGISTER_TIMEOUT, help="脚本最大运行时长(秒)")
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY, help="并发数")
     parser.add_argument("--notify-url", default=NOTIFY_BASE_URL, help="通知服务地址")
     parser.add_argument("--mode", choices=["register", "maintenance", "both"], default="both", help="运行模式")
@@ -1892,12 +1888,11 @@ async def main():
                     time.sleep(sleep_duration)
                     continue
 
-                need_count = min(need_count, args.count) if args.count > 0 else need_count
                 print(f"\n需要注册 {need_count} 个账号...")
 
                 success_count, fail_count = await register_accounts_maintenance(
                     need_count,
-                    args.register_timeout * 1000,
+                    args.timeout * 1000,
                     args.domain_index,
                     args.domain,
                     args.concurrency,
