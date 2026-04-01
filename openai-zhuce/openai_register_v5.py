@@ -1543,7 +1543,7 @@ def delete_account(client: HttpClient, name: str) -> bool:
     return 200 <= status < 300
 
 
-async def upload_file(client: HttpClient, file_path: str, retry_count: int = 3) -> Tuple[bool, str]:
+async def upload_file(client: HttpClient, file_path: str) -> Tuple[bool, str]:
     file_name = os.path.basename(file_path)
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -1553,9 +1553,11 @@ async def upload_file(client: HttpClient, file_path: str, retry_count: int = 3) 
 
     url = f"{client.base_url}/v0/management/auth-files?name={requests.utils.quote(file_name)}"
 
-    for attempt in range(1, retry_count + 1):
+    attempt = 0
+    while True:
+        attempt += 1
         try:
-            print(f"  ↗ 开始上传: {file_name} (尝试 {attempt}/{retry_count})")
+            print(f"  ↗ 开始上传: {file_name} (尝试 {attempt})")
             resp = requests.post(
                 url,
                 headers={
@@ -1565,7 +1567,7 @@ async def upload_file(client: HttpClient, file_path: str, retry_count: int = 3) 
                 },
                 data=file_content.encode('utf-8'),
                 impersonate="chrome",
-                timeout=30,
+                timeout=60,
             )
             status_code = resp.status_code
             response_body = resp.text or ""
@@ -1576,30 +1578,23 @@ async def upload_file(client: HttpClient, file_path: str, retry_count: int = 3) 
                     if resp_data.get('status') in ('ok', 'success') or not resp_data:
                         return True, file_name
                     elif resp_data.get('error'):
-                        if attempt < retry_count:
-                            time.sleep(1)
-                            continue
-                        return False, f"服务端错误: {resp_data.get('error')}"
+                        print(f"  ⚠ 上传响应异常: 服务端错误: {resp_data.get('error')}，60秒后重试")
+                        time.sleep(60)
+                        continue
                     else:
                         return True, file_name
                 except json.JSONDecodeError:
                     return True, file_name
             else:
                 err_preview = response_body[:200].replace('\n', ' ')
-                if attempt < retry_count:
-                    print(f"  ⚠ 上传响应异常: HTTP {status_code} {err_preview}")
-                    time.sleep(1)
-                    continue
-                return False, f"HTTP {status_code}: {err_preview}"
+                print(f"  ⚠ 上传响应异常: HTTP {status_code} {err_preview}，60秒后重试")
+                time.sleep(60)
+                continue
 
         except Exception as e:
-            if attempt < retry_count:
-                print(f"  ⚠ 上传异常: {e}")
-                time.sleep(1)
-                continue
-            return False, str(e)
-
-    return False, "Max retries exceeded"
+            print(f"  ⚠ 上传异常: {e}，60秒后重试")
+            time.sleep(60)
+            continue
 
 
 def verify_upload(client: HttpClient, file_name: str) -> bool:
@@ -1700,14 +1695,7 @@ async def register_accounts_maintenance(
                 file_name = os.path.basename(file_path)
                 generated_token_files[file_name] = file_path
 
-                upload_success = False
-                upload_err = ""
-                for retry in range(3):
-                    upload_success, upload_err = await upload_file(client, file_path)
-                    if upload_success:
-                        break
-                    print(f"  ⚠ 上传重试 {retry + 1}/3: {file_name}")
-                    await asyncio.sleep(60)
+                upload_success, upload_err = await upload_file(client, file_path)
 
                 if upload_success:
                     print(f"  ✓ 上传新账号: {file_name}")
@@ -1717,9 +1705,6 @@ async def register_accounts_maintenance(
                         del generated_token_files[file_name]
                     except:
                         pass
-                else:
-                    print(f"  ✗ 上传失败: {file_name} ({upload_err})")
-                    raise RuntimeError(f"上传失败，已重试3次: {file_name}")
 
             if result.get('email'):
                 proxies = {"http": proxy, "https": proxy} if proxy else None
@@ -1736,16 +1721,9 @@ async def register_accounts_maintenance(
             token_files = [f for f in os.listdir(TOKENS_DIR) if re.match(r'^token.*\.json$', f) and result.get('email', '').replace('@', '_') in f]
             for file_name in token_files:
                 file_path = os.path.join(TOKENS_DIR, file_name)
-                
-                upload_success = False
-                upload_err = ""
-                for retry in range(3):
-                    upload_success, upload_err = await upload_file(client, file_path)
-                    if upload_success:
-                        break
-                    print(f"  ⚠ 上传重试 {retry + 1}/3: {file_name}")
-                    await asyncio.sleep(60)
-                
+
+                upload_success, upload_err = await upload_file(client, file_path)
+
                 if upload_success:
                     print(f"  ✓ 上传新账号: {file_name}")
                     try:
@@ -1753,9 +1731,6 @@ async def register_accounts_maintenance(
                         print(f"  ✓ 已删除本地文件: {file_name}")
                     except:
                         pass
-                else:
-                    print(f"  ✗ 上传失败: {file_name} ({upload_err})")
-                    raise RuntimeError(f"上传失败，已重试3次: {file_name}")
 
             if result.get('email'):
                 proxies = {"http": proxy, "https": proxy} if proxy else None
