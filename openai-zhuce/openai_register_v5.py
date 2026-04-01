@@ -1616,12 +1616,15 @@ def verify_upload(client: HttpClient, file_name: str) -> bool:
 
 async def run_concurrent(items: List, fn: Callable, concurrency: int, client: HttpClient, quota_threshold: float) -> List:
     results = []
+    import time
     for i in range(0, len(items), concurrency):
         chunk = items[i:i + concurrency]
+        start_time = time.time()
         tasks = [fn(client, item, quota_threshold) for item in chunk]
         chunk_results = await asyncio.gather(*tasks)
+        elapsed = time.time() - start_time
         results.extend(chunk_results)
-        print(f"\r进度: {min(i + concurrency, len(items))}/{len(items)}", end='', flush=True)
+        print(f"\r进度: {min(i + concurrency, len(items))}/{len(items)} (批次耗时: {elapsed:.1f}s)", end='', flush=True)
     print()
     return results
 
