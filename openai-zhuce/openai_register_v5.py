@@ -1601,6 +1601,7 @@ async def upload_file(client: HttpClient, file_path: str, retry_count: int = 3) 
 
             status_line = response[:header_end].decode('utf-8', errors='ignore').split('\r\n')[0]
             status_code = int(status_line.split()[1])
+            response_body = response[header_end + 4:].decode('utf-8', errors='ignore')
 
             if 200 <= status_code < 300:
                 try:
