@@ -63,21 +63,18 @@ python openai_register_v5.py --domain mail.example.com
 python openai_register_v5.py --count 10 --workers 5
 
 # 5. 维护模式 - 检测并补充账号至阈值
-python openai_register_v5.py --mode maintenance --target-url https://api.example.com --target-token YOUR_TOKEN --min-accounts 100 --register-count 0
-
-# 6. 维护模式 - 默认每轮注册 1 个账号
 python openai_register_v5.py --mode maintenance --target-url https://api.example.com --target-token YOUR_TOKEN --min-accounts 100
 
-# 7. 维护模式 - 批量直接注册 10 个账号
-python openai_register_v5.py --mode maintenance --target-url https://api.example.com --target-token YOUR_TOKEN --register-count 10
-
-# 7. 综合模式 - 同时支持注册和维护
+# 6. 综合模式 - 同时支持注册和维护
 python openai_register_v5.py --mode both --target-url https://api.example.com --target-token YOUR_TOKEN --min-accounts 100
+
+# 7. 维护模式 - 指定每次注册数量
+python openai_register_v5.py --mode maintenance --target-url https://api.example.com --target-token YOUR_TOKEN --min-accounts 100 --count 5
 
 # 8. 使用环境变量设置目标服务器地址和令牌
 set TARGET_URL=https://api.example.com
 set TARGET_TOKEN=your_token
-python openai_register_v5.py --mode maintenance --min-accounts 100 --register-count 0
+python openai_register_v5.py --mode maintenance --min-accounts 100
 
 # 9. 自定义参数
 python openai_register_v5.py --mode both --target-url https://api.example.com --target-token YOUR_TOKEN --quota-threshold 15 --register-timeout 3600 --concurrency 30
@@ -1356,7 +1353,6 @@ class HttpClient:
 
     def request(self, path: str, method: str = "GET", body: str = None, headers: dict = None) -> Tuple[int, Any]:
         url = self.base_url + path
-        parsed = urlparse(url)
 
         request_headers = {
             'Authorization': f'Bearer {self.token}',
@@ -1367,42 +1363,16 @@ class HttpClient:
             request_headers.update(headers)
 
         try:
-            sock = self._create_connection(url)
-
-            request_line = f"{method} {parsed.path}{'?' + parsed.query if parsed.query else ''} HTTP/1.1\r\n"
-            header_str = ''.join(f"{k}: {v}\r\n" for k, v in request_headers.items())
-            header_str += f"Host: {parsed.hostname}\r\n"
-            header_str += "Connection: close\r\n"
-            header_str += "\r\n"
-
-            sock.sendall(header_str.encode())
-            if body:
-                sock.sendall(body.encode())
-
-            response = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response += chunk
-
-            sock.close()
-
-            header_end = response.find(b'\r\n\r\n')
-            if header_end == -1:
-                return 500, "Invalid response"
-
-            header_part = response[:header_end].decode('utf-8', errors='ignore')
-            body_part = response[header_end + 4:]
-
-            status_line = header_part.split('\r\n')[0]
-            status_code = int(status_line.split()[1])
+            if method == "GET":
+                resp = requests.get(url, headers=request_headers, impersonate="chrome", timeout=30)
+            else:
+                resp = requests.post(url, headers=request_headers, data=body, impersonate="chrome", timeout=30)
 
             try:
-                body_json = json.loads(body_part.decode('utf-8', errors='ignore'))
-                return status_code, body_json
+                data = resp.json()
+                return resp.status_code, data
             except:
-                return status_code, body_part.decode('utf-8', errors='ignore')
+                return resp.status_code, resp.text
 
         except Exception as e:
             return 500, str(e)
@@ -1421,7 +1391,6 @@ def send_notification(title: str, content: str, notify_base_url: str = NOTIFY_BA
 
 def get_accounts(client: HttpClient) -> List[dict]:
     status, data = client.request('/v0/management/auth-files')
-    print(f"  get_accounts HTTP状态: {status}, 数据类型: {type(data)}, 数据: {str(data)[:200]}")  # 调试
     if status >= 200 and status < 300:
         if isinstance(data, dict):
             files = data.get('files', [])
@@ -1651,7 +1620,8 @@ async def run_concurrent(items: List, fn: Callable, concurrency: int, client: Ht
     results = []
     for i in range(0, len(items), concurrency):
         chunk = items[i:i + concurrency]
-        chunk_results = [await fn(client, item, quota_threshold) for item in chunk]
+        tasks = [fn(client, item, quota_threshold) for item in chunk]
+        chunk_results = await asyncio.gather(*tasks)
         results.extend(chunk_results)
         print(f"\r进度: {min(i + concurrency, len(items))}/{len(items)}", end='', flush=True)
     print()
@@ -1807,7 +1777,6 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
     print('\n--- 检测账号状态 ---')
 
     accounts = get_accounts(client)
-    print(f"  原始账号数据: {accounts[:2] if accounts else '空'}...")  # 调试
     if not accounts:
         print("获取账号列表失败")
         return 0
@@ -1870,7 +1839,6 @@ async def main():
     parser.add_argument("--quota-threshold", type=float, default=DEFAULT_QUOTA_THRESHOLD_PERCENT, help="额度不足删除阈值")
     parser.add_argument("--register-timeout", type=int, default=DEFAULT_REGISTER_TIMEOUT, help="注册循环总时长限制(秒)")
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY, help="并发数")
-    parser.add_argument("--register-count", type=int, default=1, help="注册模式: 0=补充不足数量, 1=默认注册1个, N=批量注册N个")
     parser.add_argument("--notify-url", default=NOTIFY_BASE_URL, help="通知服务地址")
     parser.add_argument("--mode", choices=["register", "maintenance", "both"], default="both", help="运行模式")
 
@@ -1905,8 +1873,7 @@ async def main():
                 log.warning("[*] 缺少 --target-token，仅执行注册")
                 pass
         else:
-            register_count = args.register_count
-            sleep_duration = 60 * 1000
+            sleep_duration = 60
             round_num = 0
             ever_registered = False
 
@@ -1916,33 +1883,17 @@ async def main():
                 print(f"第 {round_num} 轮维护")
                 print('=' * 60)
 
-                need_count = 0
-                valid_count = 0
+                valid_count = await check_and_clean_accounts(client, args.quota_threshold, args.concurrency)
+                need_count = args.min_accounts - valid_count
+                print(f"\n当前有效 codex 账号: {valid_count} 个，阈值: {args.min_accounts}")
 
-                if register_count == 1:
-                    print(f"\n默认模式: 先检测清理，再注册 1 个账号")
-                    valid_count = await check_and_clean_accounts(client, args.quota_threshold, args.concurrency)
-                    print(f"\n当前有效 codex 账号: {valid_count} 个，阈值: {args.min_accounts}")
-                    need_count = 1
-                elif register_count == 0:
-                    valid_count = await check_and_clean_accounts(client, args.quota_threshold, args.concurrency)
-                    print(f"\n当前有效 codex 账号: {valid_count} 个，阈值: {args.min_accounts}")
-                    need_count = args.min_accounts - valid_count
-                    if need_count <= 0:
-                        print(f"\n账号充足 (>= {args.min_accounts})，无需补充")
-                        if ever_registered:
-                            print("曾注册过账号，维护结束")
-                            print('\n' + '=' * 60)
-                            print('维护完成')
-                            print('=' * 60)
-                            break
-                        print(f"从未注册过账号，{sleep_duration / 1000} 秒后继续检测...")
-                        time.sleep(sleep_duration / 1000)
-                        continue
-                    print(f"\n需要补充 {need_count} 个账号...")
-                else:
-                    need_count = register_count
-                    print(f"\n批量注册模式: 本轮维护注册 {need_count} 个账号")
+                if need_count < 1:
+                    print(f"\n账号充足 (>= {args.min_accounts})，等待 {sleep_duration} 秒后继续检测...")
+                    time.sleep(sleep_duration)
+                    continue
+
+                need_count = min(need_count, args.count) if args.count > 0 else need_count
+                print(f"\n需要注册 {need_count} 个账号...")
 
                 success_count, fail_count = await register_accounts_maintenance(
                     need_count,
