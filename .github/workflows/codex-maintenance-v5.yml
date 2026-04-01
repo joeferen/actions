@@ -32,7 +32,6 @@ jobs:
         if: steps.install_python.outcome == 'success'
         id: maintenance
         timeout-minutes: 331
-        continue-on-error: true
         env:
           REG_CMD_V5: ${{ vars.REG_CMD_V5 }}
         run: |
