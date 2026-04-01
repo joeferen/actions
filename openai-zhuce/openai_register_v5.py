@@ -1681,7 +1681,7 @@ async def register_accounts_maintenance(
     success_count = 0
     fail_count = 0
     consecutive_fails = 0
-    max_consecutive_fails = 5
+    max_consecutive_fails = 3
     register_interval = 1000
     start_time = time.time()
     generated_token_files = {}
@@ -1955,10 +1955,10 @@ async def main():
                 ever_registered = True
 
                 print('\n' + '=' * 60)
-                print('维护完成')
+                print('本轮申请完成，返回检测流程')
                 print('=' * 60)
                 print(f"成功: {success_count} 个, 失败: {fail_count} 个")
-                break
+                continue
 
     if args.mode == "register":
         total = args.count
