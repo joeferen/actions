@@ -1769,16 +1769,18 @@ async def register_accounts_maintenance(
 
 
 async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, concurrency: int) -> int:
-    print('\n--- 检测账号状态 ---')
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"\n{ts} --- 检测账号状态 ---")
     check_start_time = time.time()
 
     accounts = get_accounts(client)
     if not accounts:
-        print("获取账号列表失败")
+        print(f"{ts} 获取账号列表失败")
         return 0
 
     codex_accounts = [acc for acc in accounts if acc.get('provider') == 'codex']
-    print(f"当前 codex 账号: {len(codex_accounts)} 个")
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"{ts} 当前 codex 账号: {len(codex_accounts)} 个", flush=True)
 
     if not codex_accounts:
         return 0
@@ -1790,14 +1792,14 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
     ok = [r for r in check_results if not r.get('invalid_401') and not r.get('low_quota') and not r.get('error')]
     elapsed_values = [r.get('elapsed_seconds') for r in check_results if isinstance(r.get('elapsed_seconds'), (int, float))]
 
-    print(f"  - 401 失效: {len(invalid_401)} 个")
-    print(f"  - 额度不足: {len(low_quota)} 个")
-    print(f"  - 正常: {len(ok)} 个")
+    print(f"  - 401 失效: {len(invalid_401)} 个", flush=True)
+    print(f"  - 额度不足: {len(low_quota)} 个", flush=True)
+    print(f"  - 正常: {len(ok)} 个", flush=True)
     if elapsed_values:
         avg_elapsed = sum(elapsed_values) / len(elapsed_values)
         max_elapsed = max(elapsed_values)
         min_elapsed = min(elapsed_values)
-        print(f"  - 单账号耗时: avg={avg_elapsed:.2f}s min={min_elapsed:.2f}s max={max_elapsed:.2f}s")
+        print(f"  - 单账号耗时: avg={avg_elapsed:.2f}s min={min_elapsed:.2f}s max={max_elapsed:.2f}s", flush=True)
 
     to_delete = []
 
@@ -1810,13 +1812,14 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
             remain_str = f"{round(remain * 10) / 10}%" if remain is not None else 'unknown'
             to_delete.append({'name': acc['name'], 'reason': f'quota<{quota_threshold}% (remain={remain_str})'})
 
-    print(f"\n删除 {len(to_delete)} 个失效账号...")
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"\n{ts} 删除 {len(to_delete)} 个失效账号...", flush=True)
     for acc in to_delete:
         try:
             if delete_account(client, acc['name']):
-                print(f"  ✓ 删除: {acc['name']} ({acc['reason']})")
+                print(f"  ✓ 删除: {acc['name']} ({acc['reason']})", flush=True)
             else:
-                print(f"  ✗ 删除失败: {acc['name']}")
+                print(f"  ✗ 删除失败: {acc['name']}", flush=True)
         except Exception as e:
             print(f"  ✗ 删除异常: {acc['name']} - {e}")
 
