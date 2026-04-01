@@ -1674,7 +1674,7 @@ async def register_accounts_maintenance(
     base_url: str,
     token: str,
     proxy: str = None
-) -> Tuple[int, int]:
+) -> Tuple[int, int, bool]:
     print(f"开始注册 {need_count} 个账号...")
     print(f"注册总时长限制: {register_timeout / 1000} 秒")
 
@@ -1685,6 +1685,7 @@ async def register_accounts_maintenance(
     register_interval = 1000
     start_time = time.time()
     generated_token_files = {}
+    stopped_by_consecutive_fails = False
 
     while success_count + fail_count < need_count:
         elapsed = int(time.time() - start_time)
@@ -1694,6 +1695,7 @@ async def register_accounts_maintenance(
 
         if consecutive_fails >= max_consecutive_fails:
             print(f"\n[Error] 连续失败 {consecutive_fails} 次，停止注册")
+            stopped_by_consecutive_fails = True
             break
 
         total_count = success_count + fail_count + 1
@@ -1806,7 +1808,7 @@ async def register_accounts_maintenance(
             else:
                 print(f"  ✗ 补传失败: {file_name}")
 
-    return success_count, fail_count
+    return success_count, fail_count, stopped_by_consecutive_fails
 
 
 async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, concurrency: int) -> int:
@@ -1940,7 +1942,7 @@ async def main():
 
                 print(f"\n需要注册 {need_count} 个账号...")
 
-                success_count, fail_count = await register_accounts_maintenance(
+                success_count, fail_count, stopped_by_consecutive_fails = await register_accounts_maintenance(
                     need_count,
                     args.timeout * 1000,
                     args.domain_index,
@@ -1958,6 +1960,9 @@ async def main():
                 print('本轮申请完成，返回检测流程')
                 print('=' * 60)
                 print(f"成功: {success_count} 个, 失败: {fail_count} 个")
+                if stopped_by_consecutive_fails:
+                    print("连续失败达到阈值，退出维护循环")
+                    break
                 continue
 
     if args.mode == "register":
