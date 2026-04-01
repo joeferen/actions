@@ -1415,9 +1415,16 @@ async def check_account(client: HttpClient, item: dict, quota_threshold: float) 
     auth_index = item.get('auth_index')
     name = item.get('name') or item.get('id')
     chatgpt_account_id = item.get('chatgpt_account_id') or item.get('chatgptAccountId') or item.get('account_id') or item.get('accountId')
+    start_time = time.time()
 
     if not auth_index:
-        return {'name': name, 'error': 'missing auth_index', 'invalid_401': False, 'low_quota': False}
+        return {
+            'name': name,
+            'error': 'missing auth_index',
+            'invalid_401': False,
+            'low_quota': False,
+            'elapsed_seconds': round(time.time() - start_time, 3),
+        }
 
     try:
         payload = {
@@ -1517,10 +1524,17 @@ async def check_account(client: HttpClient, item: dict, quota_threshold: float) 
             'primary_reset_at': primary_reset_at,
             'individual_used_percent': individual_used_percent,
             'individual_reset_at': individual_reset_at,
-            'error': None
+            'error': None,
+            'elapsed_seconds': round(time.time() - start_time, 3),
         }
     except Exception as e:
-        return {'name': name, 'error': str(e), 'invalid_401': False, 'low_quota': False}
+        return {
+            'name': name,
+            'error': str(e),
+            'invalid_401': False,
+            'low_quota': False,
+            'elapsed_seconds': round(time.time() - start_time, 3),
+        }
 
 
 def delete_account(client: HttpClient, name: str) -> bool:
@@ -1615,18 +1629,42 @@ def verify_upload(client: HttpClient, file_name: str) -> bool:
 
 
 async def run_concurrent(items: List, fn: Callable, concurrency: int, client: HttpClient, quota_threshold: float) -> List:
-    results = []
-    import time
-    for i in range(0, len(items), concurrency):
-        chunk = items[i:i + concurrency]
-        start_time = time.time()
-        tasks = [fn(client, item, quota_threshold) for item in chunk]
-        chunk_results = await asyncio.gather(*tasks)
-        elapsed = time.time() - start_time
-        results.extend(chunk_results)
-        print(f"\r进度: {min(i + concurrency, len(items))}/{len(items)} (批次耗时: {elapsed:.1f}s)", end='', flush=True)
+    if not items:
+        return []
+
+    total = len(items)
+    limit = max(1, min(concurrency, total))
+    results = [None] * total
+    completed = 0
+    started = 0
+    start_time = time.time()
+
+    async def run_one(index: int, item: dict):
+        result = await fn(client, item, quota_threshold)
+        return index, result
+
+    in_flight = set()
+
+    while started < total and len(in_flight) < limit:
+        in_flight.add(asyncio.create_task(run_one(started, items[started])))
+        started += 1
+
+    while in_flight:
+        done, in_flight = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+
+        for task in done:
+            index, result = await task
+            results[index] = result
+            completed += 1
+            elapsed = time.time() - start_time
+            print(f"\r进度: {completed}/{total} (在飞: {len(in_flight)}/{limit}, 总耗时: {elapsed:.1f}s)", end='', flush=True)
+
+            if started < total:
+                in_flight.add(asyncio.create_task(run_one(started, items[started])))
+                started += 1
+
     print()
-    return results
+    return [r for r in results if r is not None]
 
 
 async def register_accounts_maintenance(
@@ -1776,6 +1814,7 @@ async def register_accounts_maintenance(
 
 async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, concurrency: int) -> int:
     print('\n--- 检测账号状态 ---')
+    check_start_time = time.time()
 
     accounts = get_accounts(client)
     if not accounts:
@@ -1793,10 +1832,18 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
     invalid_401 = [r for r in check_results if r.get('invalid_401')]
     low_quota = [r for r in check_results if r.get('low_quota')]
     ok = [r for r in check_results if not r.get('invalid_401') and not r.get('low_quota') and not r.get('error')]
+    elapsed_values = [r.get('elapsed_seconds') for r in check_results if isinstance(r.get('elapsed_seconds'), (int, float))]
+    total_check_elapsed = time.time() - check_start_time
 
     print(f"  - 401 失效: {len(invalid_401)} 个")
     print(f"  - 额度不足: {len(low_quota)} 个")
     print(f"  - 正常: {len(ok)} 个")
+    print(f"  - 检测总耗时: {total_check_elapsed:.1f}s")
+    if elapsed_values:
+        avg_elapsed = sum(elapsed_values) / len(elapsed_values)
+        max_elapsed = max(elapsed_values)
+        min_elapsed = min(elapsed_values)
+        print(f"  - 单账号耗时: avg={avg_elapsed:.2f}s min={min_elapsed:.2f}s max={max_elapsed:.2f}s")
 
     to_delete = []
 
