@@ -1720,6 +1720,20 @@ async def register_accounts_maintenance(
             consecutive_fails = 0
             print(f"  ✓ 注册成功")
 
+            token_files = [f for f in os.listdir(TOKENS_DIR) if re.match(r'^token.*\.json$', f) and result.get('email', '').replace('@', '_') in f]
+            for file_name in token_files:
+                file_path = os.path.join(TOKENS_DIR, file_name)
+                upload_success, _ = await upload_file(client, file_path)
+                if upload_success:
+                    print(f"  ✓ 上传新账号: {file_name}")
+                    try:
+                        os.unlink(file_path)
+                        print(f"  ✓ 已删除本地文件: {file_name}")
+                    except:
+                        pass
+                else:
+                    print(f"  ✗ 上传失败: {file_name}")
+
             if result.get('email'):
                 proxies = {"http": proxy, "https": proxy} if proxy else None
                 if delete_mailbox(result['email'], proxies):
