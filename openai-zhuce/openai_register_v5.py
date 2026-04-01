@@ -25,7 +25,6 @@ OpenAI 自动注册脚本 V5 - 集成版
   --domain            指定邮箱域名（如 mail.example.com），优先级高于 --domain-index
   --mail-url          邮箱服务地址（默认 https://mailfree.smanx.xx.kg）
   --mail-token        邮箱服务授权令牌（默认 auto）
-  --once              只运行一次注册
 
 注册模式参数：
   --count             注册数量（默认 1）
@@ -52,13 +51,13 @@ OpenAI 自动注册脚本 V5 - 集成版
 ================================================================================
 
 # 1. 单独注册模式 - 注册 1 个账号
-python openai_register_v5.py --once
+python openai_register_v5.py --count 1
 
 # 2. 单独注册模式 - 使用代理注册
-python openai_register_v5.py --once --proxy http://127.0.0.1:10808
+python openai_register_v5.py --proxy http://127.0.0.1:10808
 
 # 3. 单独注册模式 - 指定邮箱域名
-python openai_register_v5.py --once --domain mail.example.com
+python openai_register_v5.py --domain mail.example.com
 
 # 4. 单独注册模式 - 批量注册 10 个账号
 python openai_register_v5.py --count 10 --workers 5
@@ -1422,8 +1421,16 @@ def send_notification(title: str, content: str, notify_base_url: str = NOTIFY_BA
 
 def get_accounts(client: HttpClient) -> List[dict]:
     status, data = client.request('/v0/management/auth-files')
+    print(f"  get_accounts HTTP状态: {status}, 数据类型: {type(data)}, 数据: {str(data)[:200]}")  # 调试
     if status >= 200 and status < 300:
-        return data.get('files', []) if isinstance(data, dict) else []
+        if isinstance(data, dict):
+            files = data.get('files', [])
+            print(f"  get_accounts files数量: {len(files)}")  # 调试
+            return files
+        elif isinstance(data, list):
+            return data
+        return []
+    print(f"  get_accounts 请求失败: HTTP {status}")  # 调试
     return []
 
 
@@ -1800,6 +1807,7 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
     print('\n--- 检测账号状态 ---')
 
     accounts = get_accounts(client)
+    print(f"  原始账号数据: {accounts[:2] if accounts else '空'}...")  # 调试
     if not accounts:
         print("获取账号列表失败")
         return 0
@@ -1853,7 +1861,6 @@ async def main():
     parser.add_argument("--mail-token", default=DEFAULT_JWT_TOKEN, help="邮箱服务授权令牌（默认 auto）")
     parser.add_argument("--count", type=int, default=1, help="注册数量")
     parser.add_argument("--workers", type=int, default=1, help="并发线程数")
-    parser.add_argument("--once", action="store_true", help="只运行一次")
     parser.add_argument("--sleep-min", type=int, default=5, help="循环模式最短等待秒数")
     parser.add_argument("--sleep-max", type=int, default=30, help="循环模式最长等待秒数")
     parser.add_argument("--save-account", action="store_true", help="保存账号密码")
