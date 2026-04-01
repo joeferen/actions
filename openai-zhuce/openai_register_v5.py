@@ -1711,6 +1711,15 @@ async def register_accounts_maintenance(
             if result.get('email'):
                 proxies = {"http": proxy, "https": proxy} if proxy else None
                 delete_mailbox(result['email'], proxies)
+        elif result and result.get('token'):
+            save_result(result)
+            success_count += 1
+            consecutive_fails = 0
+            print(f"  ✓ 注册成功")
+
+            if result.get('email'):
+                proxies = {"http": proxy, "https": proxy} if proxy else None
+                delete_mailbox(result['email'], proxies)
         else:
             fail_count += 1
             consecutive_fails += 1
