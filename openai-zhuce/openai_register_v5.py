@@ -1896,7 +1896,8 @@ async def main():
                 print(f"\n当前有效 codex 账号: {valid_count} 个，阈值: {args.min_accounts}")
 
                 if need_count < 1:
-                    print(f"\n账号充足 (>= {args.min_accounts})，等待 {sleep_duration} 秒后继续检测...")
+                    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    print(f"\n{ts} 账号充足 (>= {args.min_accounts})，等待 {sleep_duration} 秒后继续检测...", flush=True)
                     time.sleep(sleep_duration)
                     continue
 
