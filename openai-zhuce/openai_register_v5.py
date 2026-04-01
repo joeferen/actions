@@ -1361,6 +1361,8 @@ class HttpClient:
         try:
             if method == "GET":
                 resp = requests.get(url, headers=request_headers, impersonate="chrome", timeout=30)
+            elif method == "DELETE":
+                resp = requests.delete(url, headers=request_headers, impersonate="chrome", timeout=30)
             else:
                 resp = requests.post(url, headers=request_headers, data=body, impersonate="chrome", timeout=30)
 
