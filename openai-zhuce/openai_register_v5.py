@@ -1952,7 +1952,8 @@ async def register_accounts_maintenance(
     base_url: str,
     token: str,
     register_interval: int = 60,
-    proxy: str = None
+    proxy: Optional[str] = None,
+    global_start_time: Optional[float] = None
 ) -> Tuple[int, int, bool]:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"{ts} 开始注册 {need_count} 个账号...")
@@ -1964,14 +1965,17 @@ async def register_accounts_maintenance(
     consecutive_400_fails = 0
     max_consecutive_fails = 3
     start_time = time.time()
+    overall_start_time = global_start_time or start_time
     generated_token_files = {}
     stopped_by_consecutive_fails = False
 
     while success_count + fail_count < need_count:
-        elapsed = int(time.time() - start_time)
-        if elapsed >= register_timeout:
+        register_elapsed = int(time.time() - start_time)
+        total_elapsed = int(time.time() - overall_start_time)
+        remaining_time = max(0, int(register_timeout - register_elapsed))
+        if register_elapsed >= register_timeout:
             ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f"\n{ts} [Warn] 注册总运行时已达 {elapsed}s (限制: {register_timeout}s)，停止注册")
+            print(f"\n{ts} [Warn] 注册阶段运行时已达 {register_elapsed}s (限制: {register_timeout}s)，停止注册")
             break
 
         if consecutive_fails >= max_consecutive_fails:
@@ -1983,8 +1987,7 @@ async def register_accounts_maintenance(
             break
 
         total_count = success_count + fail_count + 1
-        remaining_time = max(0, register_timeout - elapsed)
-        print(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 已运行: {elapsed}s, 剩余: {remaining_time}s) ---")
+        print(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 已运行: {total_elapsed}s, 剩余: {remaining_time}s) ---")
 
         before_snap = snapshot_token_files()
 
@@ -2137,6 +2140,7 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
 
 
 async def main():
+    script_start_time = time.time()
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本 V5 - 集成版")
     parser.add_argument("--proxy", default=None, help="代理地址")
     parser.add_argument("--domain-index", type=int, default=DEFAULT_DOMAIN_INDEX, help="邮箱域名索引")
@@ -2193,12 +2197,11 @@ async def main():
             sleep_duration = 60
             round_num = 0
             ever_registered = False
-            start_time = time.time()
             total_timeout = args.timeout
 
             while True:
                 round_num += 1
-                elapsed = int(time.time() - start_time)
+                elapsed = int(time.time() - script_start_time)
                 remaining = max(0, total_timeout - elapsed)
                 print('\n' + '=' * 60)
                 print(f"第 {round_num} 轮维护 (总运行时长: {elapsed}s, 剩余: {remaining}s)")
@@ -2231,7 +2234,8 @@ async def main():
                     base_url,
                     token,
                     args.register_interval,
-                    args.proxy
+                    args.proxy,
+                    script_start_time,
                 )
 
                 ever_registered = True
