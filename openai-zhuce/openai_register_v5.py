@@ -29,6 +29,10 @@ OpenAI 自动注册脚本 V5 - 集成版
   --mail-url          邮箱服务地址（默认 https://mailfree.smanx.xx.kg）
   --mail-token        邮箱服务授权令牌（默认 auto）
   --timeout           脚本最大运行时长（秒，默认 18000）
+  --domain-ready-timeout Cloudflare 新域名等待邮箱服务生效超时（秒，默认 10）
+  --domain-ready-interval Cloudflare 新域名生效轮询间隔（秒，默认 5）
+  --worker-verify-timeout Worker 环境变量更新校验超时（秒，默认 5）
+  --worker-verify-interval Worker 环境变量更新校验间隔（秒，默认 2）
 
 Cloudflare 子域轮换说明：
   1. 至少需要 --cf-api-token / --cf-worker-name / --cf-base-domain
@@ -101,6 +105,9 @@ python openai_register_v5.py --mode maintenance --min-accounts 50 --maintenance-
 
 # 11. 启用 Cloudflare 子域轮换后再继续注册
 python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worker-name YOUR_WORKER_NAME --cf-base-domain example.com
+
+# 12. 自定义 Cloudflare 域名生效和 Worker 校验等待时间
+python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worker-name YOUR_WORKER_NAME --cf-base-domain example.com --domain-ready-timeout 300 --domain-ready-interval 10 --worker-verify-timeout 60 --worker-verify-interval 3
 
 ================================================================================
 """
@@ -467,13 +474,87 @@ def _cf_print_subdomains(zone_id: str, base_domain: str, api_token: str) -> List
         if str(record.get("name") or "").lower().endswith(suffix)
         and str(record.get("name") or "").lower() != base_domain.strip('.').lower()
     })
-    print("Cloudflare 当前子域列表:")
+    print("[CF] 当前子域列表:")
     if names:
         for item in names:
             print(f"  - {item}")
     else:
         print("  - (空)")
     return names
+
+
+def _cf_get_binding_text(settings: Dict[str, Any], binding_name: str) -> str:
+    bindings = settings.get("bindings") or []
+    binding = next((b for b in bindings if b.get("name") == binding_name), None)
+    return str((binding or {}).get("text") or "").strip()
+
+
+def _cf_build_worker_settings_payload(settings: Dict[str, Any], plain_text_updates: Dict[str, str]) -> Dict[str, Any]:
+    bindings = list(settings.get("bindings") or [])
+    for name, value in plain_text_updates.items():
+        updated = False
+        for binding in bindings:
+            if binding.get("name") == name:
+                binding["text"] = value
+                updated = True
+                break
+        if not updated:
+            bindings.append({"type": "plain_text", "name": name, "text": value})
+
+    payload: Dict[str, Any] = {"bindings": bindings}
+    for key in (
+        "compatibility_date",
+        "compatibility_flags",
+        "usage_model",
+        "limits",
+        "placement",
+        "tail_consumers",
+        "logpush",
+        "observability",
+    ):
+        if key in settings:
+            payload[key] = settings[key]
+    return payload
+
+
+def _cf_patch_worker_settings_multipart(account_id: str, worker_name: str, payload: Dict[str, Any], api_token: str) -> None:
+    mime = CurlMime()
+    mime.addpart(
+        "settings",
+        content_type="application/json",
+        filename="settings.json",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    )
+
+    resp = requests.request(
+        "PATCH",
+        f"{CF_API_BASE}/accounts/{account_id}/workers/scripts/{worker_name}/settings",
+        headers={"Authorization": f"Bearer {api_token}"},
+        multipart=mime,
+        impersonate="chrome",
+        timeout=30,
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        preview = (resp.text or "")[:300]
+        raise RuntimeError(f"Cloudflare Worker 设置更新响应异常: HTTP {resp.status_code} {preview}")
+    if resp.status_code < 200 or resp.status_code >= 300 or not data.get("success", False):
+        errors = data.get("errors") or []
+        err_msg = "; ".join(str(x.get("message") or x) for x in errors) if errors else (resp.text or "")[:300]
+        raise RuntimeError(f"Cloudflare Worker 设置更新失败: HTTP {resp.status_code} {err_msg}")
+
+
+def _cf_wait_for_worker_binding(account_id: str, worker_name: str, binding_name: str, expected_value: str, api_token: str, timeout: int = 30, interval: int = 2) -> None:
+    start = time.time()
+    verify_value = ""
+    while time.time() - start < timeout:
+        verify = _cf_get_worker_settings(account_id, worker_name, api_token)
+        verify_value = _cf_get_binding_text(verify, binding_name)
+        if verify_value == expected_value:
+            return
+        time.sleep(interval)
+    raise RuntimeError(f"Worker {binding_name} 校验失败，当前值仍为: {verify_value or '(空)'}")
 
 
 def _cf_delete_domain_dns(zone_id: str, full_domain: str, api_token: str) -> int:
@@ -571,64 +652,11 @@ def _cf_get_worker_settings(account_id: str, worker_name: str, api_token: str) -
     return data.get("result") or {}
 
 
-def _cf_update_worker_mail_domain(account_id: str, worker_name: str, new_value: str, api_token: str) -> None:
+def _cf_update_worker_mail_domain(account_id: str, worker_name: str, new_value: str, api_token: str, verify_timeout: int = 30, verify_interval: int = 2) -> None:
     settings = _cf_get_worker_settings(account_id, worker_name, api_token)
-    bindings = list(settings.get("bindings") or [])
-    updated = False
-    for binding in bindings:
-        if binding.get("name") == "MAIL_DOMAIN":
-            binding["text"] = new_value
-            updated = True
-            break
-    if not updated:
-        bindings.append({"type": "plain_text", "name": "MAIL_DOMAIN", "text": new_value})
-
-    payload: Dict[str, Any] = {"bindings": bindings}
-    for key in (
-        "compatibility_date",
-        "compatibility_flags",
-        "usage_model",
-        "limits",
-        "placement",
-        "tail_consumers",
-        "logpush",
-        "observability",
-    ):
-        if key in settings:
-            payload[key] = settings[key]
-
-    mime = CurlMime()
-    mime.addpart(
-        "settings",
-        content_type="application/json",
-        filename="settings.json",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-    )
-
-    resp = requests.request(
-        "PATCH",
-        f"{CF_API_BASE}/accounts/{account_id}/workers/scripts/{worker_name}/settings",
-        headers={"Authorization": f"Bearer {api_token}"},
-        multipart=mime,
-        impersonate="chrome",
-        timeout=30,
-    )
-    try:
-        data = resp.json()
-    except Exception:
-        preview = (resp.text or "")[:300]
-        raise RuntimeError(f"Cloudflare Worker 设置更新响应异常: HTTP {resp.status_code} {preview}")
-    if resp.status_code < 200 or resp.status_code >= 300 or not data.get("success", False):
-        errors = data.get("errors") or []
-        err_msg = "; ".join(str(x.get("message") or x) for x in errors) if errors else (resp.text or "")[:300]
-        raise RuntimeError(f"Cloudflare Worker 设置更新失败: HTTP {resp.status_code} {err_msg}")
-
-    verify = _cf_get_worker_settings(account_id, worker_name, api_token)
-    verify_bindings = verify.get("bindings") or []
-    verify_binding = next((b for b in verify_bindings if b.get("name") == "MAIL_DOMAIN"), None)
-    verify_value = str((verify_binding or {}).get("text") or "").strip()
-    if verify_value != new_value:
-        raise RuntimeError(f"Worker MAIL_DOMAIN 校验失败，当前值仍为: {verify_value or '(空)'}")
+    payload = _cf_build_worker_settings_payload(settings, {"MAIL_DOMAIN": new_value})
+    _cf_patch_worker_settings_multipart(account_id, worker_name, payload, api_token)
+    _cf_wait_for_worker_binding(account_id, worker_name, "MAIL_DOMAIN", new_value, api_token, timeout=verify_timeout, interval=verify_interval)
 
 
 def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
@@ -647,12 +675,12 @@ def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
         zone_id = str(zone.get("id") or "").strip()
         if not zone_id:
             raise RuntimeError("自动查询 Zone ID 失败")
-        print(f"自动获取 Zone ID 成功: {zone_id}")
+        print(f"[CF] 自动获取 Zone ID 成功: {zone_id}")
 
         account_id = str((zone.get("account") or {}).get("id") or "").strip()
         if not account_id:
             raise RuntimeError("自动查询 Account ID 失败")
-        print(f"自动获取 Account ID 成功: {account_id}")
+        print(f"[CF] 自动获取 Account ID 成功: {account_id}")
 
         subdomains = _cf_print_subdomains(zone_id, args.cf_base_domain, cf_token)
         settings = _cf_get_worker_settings(account_id, args.cf_worker_name, cf_token)
@@ -670,41 +698,56 @@ def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
             raise RuntimeError("MAIL_DOMAIN 中没有可用域名")
 
         first_domain = domains[0]
-        print(f"当前 Worker MAIL_DOMAIN: {current_mail_domain}")
-        print(f"MAIL_DOMAIN 首个域名: {first_domain}")
+        print(f"[CF] 当前 Worker MAIL_DOMAIN: {current_mail_domain}")
+        print(f"[CF] MAIL_DOMAIN 首个域名: {first_domain}")
 
         clone_source = next((item for item in domains if item.lower().endswith(f".{args.cf_base_domain.strip('.').lower()}") and item.lower() in set(subdomains)), None)
         if not clone_source:
             clone_source = next((item for item in subdomains if not item.startswith("_") and not item.split(".", 1)[0].startswith("cf2024-")), None)
         if not clone_source:
             raise RuntimeError("未找到可用于复制 DNS 的样板子域")
-        print(f"DNS 样板子域: {clone_source}")
+        print(f"[CF] DNS 样板子域: {clone_source}")
 
         new_prefix = _random_subdomain_prefix()
         new_domain = f"{new_prefix}.{args.cf_base_domain.strip('.')}"
-        print(f"开始复制样板 DNS 到新子域: {new_domain}")
+        print(f"[CF] 开始复制样板 DNS 到新子域: {new_domain}")
         created_count = _cf_clone_domain_dns(zone_id, clone_source, new_domain, cf_token)
-        print(f"新子域 DNS 复制完成: {new_domain} (新建 {created_count} 条)")
+        print(f"[CF] 新子域 DNS 复制完成: {new_domain} (新建 {created_count} 条)")
 
         base_suffix = f".{args.cf_base_domain.strip('.').lower()}"
         if first_domain.lower().endswith(base_suffix):
             if first_domain.lower() in set(subdomains):
                 deleted_count = _cf_delete_domain_dns(zone_id, first_domain, cf_token)
-                print(f"已删除被替换旧子域 DNS: {first_domain} ({deleted_count} 条)")
+                print(f"[CF] 已删除被替换旧子域 DNS: {first_domain} ({deleted_count} 条)")
             updated_domains = [new_domain] + domains[1:]
         else:
             updated_domains = [new_domain] + domains
         updated_mail_domain = ",".join(updated_domains)
         try:
-            _cf_update_worker_mail_domain(account_id, args.cf_worker_name, updated_mail_domain, cf_token)
-            print(f"已更新 Worker MAIL_DOMAIN: {updated_mail_domain}")
-            print("已触发 Worker 配置更新")
+            print(f"[CF] 开始更新 Worker MAIL_DOMAIN")
+            _cf_update_worker_mail_domain(
+                account_id,
+                args.cf_worker_name,
+                updated_mail_domain,
+                cf_token,
+                verify_timeout=max(1, int(args.worker_verify_timeout)),
+                verify_interval=max(1, int(args.worker_verify_interval)),
+            )
+            print(f"[CF] 已更新 Worker MAIL_DOMAIN: {updated_mail_domain}")
+            print("[CF] Worker 配置已完成更新并通过校验")
         except Exception as worker_err:
-            print(f"[Warn] Worker MAIL_DOMAIN 更新失败，请手动更新为: {updated_mail_domain}")
-            print(f"[Warn] Worker 更新错误: {worker_err}")
+            print(f"[Warn] [CF] Worker MAIL_DOMAIN 更新失败，请手动更新为: {updated_mail_domain}")
+            print(f"[Warn] [CF] Worker 更新错误: {worker_err}")
+
+        domain_ready_timeout = max(1, int(args.domain_ready_timeout))
+        domain_ready_interval = max(1, int(args.domain_ready_interval))
+        print(f"[MAIL] 等待邮箱服务识别新域名: {new_domain} (超时 {domain_ready_timeout}s, 间隔 {domain_ready_interval}s)")
+        if not wait_for_domain_available(new_domain, timeout=domain_ready_timeout, interval=domain_ready_interval):
+            raise RuntimeError(f"邮箱服务在 {domain_ready_timeout} 秒内仍未识别新域名: {new_domain}")
+        print(f"[MAIL] 邮箱服务已识别新域名: {new_domain}")
         return new_domain
     except Exception as e:
-        print(f"[Warn] Cloudflare 邮箱配置失败，跳过本步骤: {e}")
+        print(f"[Warn] [CF] Cloudflare 邮箱配置失败，跳过本步骤: {e}")
         return None
 
 
@@ -719,6 +762,20 @@ def get_domains(proxies: Any = None) -> List[str]:
     if resp.status_code != 200:
         raise RuntimeError(f"获取域名失败，状态码: {resp.status_code}")
     return resp.json()
+
+
+def wait_for_domain_available(domain_name: str, proxies: Any = None, timeout: int = 180, interval: int = 5) -> bool:
+    start = time.time()
+    target = str(domain_name or "").strip().lower()
+    while time.time() - start < timeout:
+        try:
+            domains = get_domains(proxies)
+            if any(str(item).strip().lower() == target for item in domains):
+                return True
+        except Exception:
+            pass
+        time.sleep(interval)
+    return False
 
 
 def get_domain_by_name(proxies: Any = None, domain_name: str = None) -> tuple:
@@ -2186,6 +2243,10 @@ async def main():
     parser.add_argument("--sleep-min", type=int, default=5, help="循环模式最短等待秒数")
     parser.add_argument("--sleep-max", type=int, default=30, help="循环模式最长等待秒数")
     parser.add_argument("--register-interval", type=int, default=60, help="注册间隔时间(秒)")
+    parser.add_argument("--domain-ready-timeout", type=int, default=10, help="Cloudflare 新域名等待邮箱服务生效超时(秒)")
+    parser.add_argument("--domain-ready-interval", type=int, default=5, help="Cloudflare 新域名生效轮询间隔(秒)")
+    parser.add_argument("--worker-verify-timeout", type=int, default=5, help="Worker 环境变量更新校验超时(秒)")
+    parser.add_argument("--worker-verify-interval", type=int, default=2, help="Worker 环境变量更新校验间隔(秒)")
     parser.add_argument("--save-account", action="store_true", help="保存账号密码")
     parser.add_argument("--target-url", default=DEFAULT_TARGET_BASE_URL, help="目标服务器地址（账号管理服务）")
     parser.add_argument("--target-token", default=DEFAULT_TARGET_TOKEN, help="目标服务器认证令牌")
