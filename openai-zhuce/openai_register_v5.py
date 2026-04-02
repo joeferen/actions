@@ -2158,6 +2158,16 @@ async def register_accounts_maintenance(
                 out(f"检测到致命错误: {fatal_registration_error}，停止后续注册并正常退出", prefix="[Warn]", ts=True)
                 stopped_by_consecutive_fails = True
                 break
+            if consecutive_fails >= max_consecutive_fails:
+                out(f"连续失败达到阈值 {max_consecutive_fails}，停止注册并正常退出", prefix="[Warn]", ts=True)
+                if consecutive_400_fails >= max_consecutive_fails:
+                    out(
+                        f"连续 {consecutive_400_fails} 次失败均为 400 错误 (registration_disallowed/类似风控)，建议等待一段时间后重试",
+                        prefix="[Warn]",
+                        ts=True,
+                    )
+                stopped_by_consecutive_fails = True
+                break
 
         out(f"本次尝试结束，休息 {register_interval} 秒后继续...", ts=True)
         time.sleep(register_interval)
