@@ -32,6 +32,7 @@ OpenAI 自动注册脚本 V5 - 集成版
   --workers           并发线程数（默认 1）
   --sleep-min         循环模式最短等待秒数（默认 5）
   --sleep-max         循环模式最长等待秒数（默认 30）
+  --register-interval 注册间隔时间（秒，默认 60）
 
 维护模式参数：
   --min-accounts      账号数量阈值（默认 100）
@@ -431,16 +432,17 @@ def poll_verification_code(
     used_codes: Optional[set] = None,
     resend_fn: Optional[Callable] = None,
     otp_sent_at: Optional[float] = None,
+    flow_name: str = "通用流程",
 ) -> str:
     regex = r"(?<!\d)(\d{6})(?!\d)"
-    used: set = set()
+    used: set = set(used_codes or set())
     seen_ids: set = set()
     start = time.time()
     last_resend = 0.0
     intervals = [3, 4, 5, 6, 8, 10]
     idx = 0
 
-    log.info(f"    📧 等待验证码 ({email})...")
+    log.info(f"    📧 [{flow_name}] 等待验证码 ({email})...")
 
     while time.time() - start < timeout:
         try:
@@ -488,7 +490,7 @@ def poll_verification_code(
                             if code not in used:
                                 used.add(code)
                                 elapsed = int(time.time() - start)
-                                log.info(f"    ✅ 验证码: {code} (耗时 {elapsed}s)")
+                                log.info(f"    ✅ [{flow_name}] 验证码: {code} (耗时 {elapsed}s)")
                                 return code
 
         except Exception as e:
@@ -499,7 +501,7 @@ def poll_verification_code(
             try:
                 resend_fn()
                 last_resend = elapsed_now
-                log.info("    🔄 已重发 OTP")
+                log.info(f"    🔄 [{flow_name}] 已重发 OTP")
             except Exception:
                 pass
 
@@ -856,6 +858,7 @@ def register_account(
             used_codes=codes,
             resend_fn=_resend,
             otp_sent_at=otp_sent_at,
+            flow_name="注册流程",
         )
 
         human_sleep("type_code")
@@ -978,6 +981,7 @@ def _relogin_for_token(
             used_codes=codes,
             resend_fn=_resend,
             otp_sent_at=otp_sent_at,
+            flow_name="重新登录流程",
         )
 
         otp_sentinel = get_sentinel_header(device_id, ua, "email_otp_validate", proxies)
@@ -1060,7 +1064,12 @@ def _login_for_token(
                 )
                 return r.status_code >= 200 and r.status_code < 300
 
-            code = poll_verification_code(email, proxies, resend_fn=_resend)
+            code = poll_verification_code(
+                email,
+                proxies,
+                resend_fn=_resend,
+                flow_name="登录补 token 流程",
+            )
             if not code:
                 raise RuntimeError("未获取到登录验证码")
 
