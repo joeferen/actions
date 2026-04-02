@@ -1953,16 +1953,16 @@ async def register_accounts_maintenance(
     token: str,
     register_interval: int = 60,
     proxy: Optional[str] = None,
-    global_start_time: Optional[float] = None
-) -> Tuple[int, int, bool]:
+    global_start_time: Optional[float] = None,
+    consecutive_fails: int = 0,
+    consecutive_400_fails: int = 0,
+) -> Tuple[int, int, bool, int, int]:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"{ts} 开始注册 {need_count} 个账号...")
     print(f"  总运行时长限制: {register_timeout:.1f} 秒")
 
     success_count = 0
     fail_count = 0
-    consecutive_fails = 0
-    consecutive_400_fails = 0
     max_consecutive_fails = 3
     start_time = time.time()
     overall_start_time = global_start_time or start_time
@@ -2000,6 +2000,7 @@ async def register_accounts_maintenance(
             success_count += 1
             consecutive_fails = 0
             print(f"  ✓ 注册成功，生成 {len(new_token_files)} 个 token 文件")
+            consecutive_400_fails = 0
 
             for file_path in new_token_files:
                 file_name = os.path.basename(file_path)
@@ -2027,6 +2028,7 @@ async def register_accounts_maintenance(
             success_count += 1
             consecutive_fails = 0
             print(f"  ✓ 注册成功")
+            consecutive_400_fails = 0
 
             token_files = [f for f in os.listdir(TOKENS_DIR) if re.match(r'^token.*\.json$', f) and result.get('email', '').replace('@', '_') in f]
             for file_name in token_files:
@@ -2051,7 +2053,12 @@ async def register_accounts_maintenance(
         else:
             fail_count += 1
             consecutive_fails += 1
-            print(f"  ✗ 注册失败 (连续失败 {consecutive_fails}/{max_consecutive_fails})")
+            error_text = str((result or {}).get('error') or '').lower() if isinstance(result, dict) else ''
+            if 'registration_disallowed' in error_text or ' 400' in error_text or 'http 400' in error_text:
+                consecutive_400_fails += 1
+            else:
+                consecutive_400_fails = 0
+            print(f"  ✗ 注册失败 (累计连续失败 {consecutive_fails}/{max_consecutive_fails})")
 
         if success_count + fail_count < need_count:
             print(f"  休息 {register_interval} 秒后继续...")
@@ -2075,7 +2082,7 @@ async def register_accounts_maintenance(
             else:
                 print(f"  ✗ 补传失败: {file_name}")
 
-    return success_count, fail_count, stopped_by_consecutive_fails
+    return success_count, fail_count, stopped_by_consecutive_fails, consecutive_fails, consecutive_400_fails
 
 
 async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, concurrency: int) -> int:
@@ -2198,6 +2205,8 @@ async def main():
             round_num = 0
             ever_registered = False
             total_timeout = args.timeout
+            maintenance_consecutive_fails = 0
+            maintenance_consecutive_400_fails = 0
 
             while True:
                 round_num += 1
@@ -2224,7 +2233,7 @@ async def main():
 
                 print(f"\n需要注册 {need_count} 个账号...")
 
-                success_count, fail_count, stopped_by_consecutive_fails = await register_accounts_maintenance(
+                success_count, fail_count, stopped_by_consecutive_fails, maintenance_consecutive_fails, maintenance_consecutive_400_fails = await register_accounts_maintenance(
                     need_count,
                     remaining,
                     args.domain_index,
@@ -2236,6 +2245,8 @@ async def main():
                     args.register_interval,
                     args.proxy,
                     script_start_time,
+                    maintenance_consecutive_fails,
+                    maintenance_consecutive_400_fails,
                 )
 
                 ever_registered = True
