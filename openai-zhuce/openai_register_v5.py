@@ -23,9 +23,28 @@ OpenAI 自动注册脚本 V5 - 集成版
   --proxy             代理地址，如 http://127.0.0.1:10808
   --domain-index      邮箱域名索引（默认 0，与 --domain 二选一）
   --domain            指定邮箱域名（如 mail.example.com），优先级高于 --domain-index
+  --cf-api-token      Cloudflare API Token；传全 CF 参数后，脚本启动时会先执行子域轮换
+  --cf-worker-name    Cloudflare Worker 名称，用于读取/更新 MAIL_DOMAIN 环境变量
+  --cf-base-domain    Cloudflare 主域名，如 example.com
   --mail-url          邮箱服务地址（默认 https://mailfree.smanx.xx.kg）
   --mail-token        邮箱服务授权令牌（默认 auto）
   --timeout           脚本最大运行时长（秒，默认 18000）
+
+Cloudflare 子域轮换说明：
+  1. 至少需要 --cf-api-token / --cf-worker-name / --cf-base-domain
+  2. 脚本第一步会打印当前 Cloudflare 主域名下的子域列表
+  3. 从 Worker 配置中读取 MAIL_DOMAIN，并按逗号分隔取第一个域名
+  4. 若第一个域名存在于当前子域列表，则删除该子域对应 DNS 记录
+  5. 从当前主域名下已存在的邮箱子域中挑选一个样板子域，复制其 MX/TXT 等 DNS 到新子域
+  6. 全流程仅使用标准 DNS Records API，不再依赖 Email Routing 专用接口权限
+  7. DNS 复制成功后，将新子域写回 Worker 的 MAIL_DOMAIN 第一位，并作为本次运行的 --domain
+
+Cloudflare API Token 最小权限建议：
+  - Zone / Zone / Read
+  - Zone / DNS / Edit
+  - Zone / Email Routing / Edit
+  - Account / Workers Scripts / Edit
+  - Token 资源范围建议仅限目标 Zone 和目标 Account
 
 注册模式参数：
   --count             注册数量（默认 1）
@@ -76,6 +95,9 @@ python openai_register_v5.py --mode maintenance --min-accounts 100
 # 9. 自定义参数
 python openai_register_v5.py --mode both --target-url https://api.example.com --target-token YOUR_TOKEN --quota-threshold 15 --timeout 3600 --concurrency 30
 
+# 10. 启用 Cloudflare 子域轮换后再继续注册
+python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worker-name YOUR_WORKER_NAME --cf-base-domain example.com
+
 ================================================================================
 """
 import json
@@ -101,7 +123,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 try:
-    from curl_cffi import requests
+    from curl_cffi import CurlMime, requests
 except ImportError:
     print("[Error] 需要安装 curl_cffi: pip install curl_cffi")
     sys.exit(1)
@@ -159,6 +181,7 @@ DEFAULT_CONCURRENCY = 50
 DEFAULT_TARGET_BASE_URL = ""
 DEFAULT_TARGET_TOKEN = ""
 NOTIFY_BASE_URL = "https://api.day.app/xxxxxxxx"
+CF_API_BASE = "https://api.cloudflare.com/client/v4"
 
 _GIVEN_NAMES = [
     "Liam", "Noah", "Oliver", "James", "Elijah", "William", "Henry", "Lucas",
@@ -331,6 +354,341 @@ def _mailfree_headers() -> Dict[str, Any]:
         "Content-Type": "application/json",
         "X-Admin-Token": JWT_TOKEN,
     }
+
+
+def _cf_headers(api_token: str) -> Dict[str, str]:
+    token = str(api_token or "").strip()
+    if not token:
+        raise RuntimeError("未提供有效的 Cloudflare API Token，请使用 --cf-api-token")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _cf_request(
+    method: str,
+    path: str,
+    api_token: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    resp = requests.request(
+        method,
+        f"{CF_API_BASE}{path}",
+        headers=_cf_headers(api_token),
+        params=params,
+        json=payload,
+        impersonate="chrome",
+        timeout=timeout,
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        preview = (resp.text or "")[:300]
+        raise RuntimeError(f"Cloudflare API 响应异常: HTTP {resp.status_code} {preview}")
+    if resp.status_code < 200 or resp.status_code >= 300 or not data.get("success", False):
+        errors = data.get("errors") or []
+        err_msg = "; ".join(str(x.get("message") or x) for x in errors) if errors else (resp.text or "")[:300]
+        raise RuntimeError(f"Cloudflare API 调用失败: HTTP {resp.status_code} {err_msg}")
+    return data
+
+
+def _cf_find_zone(base_domain: str, api_token: str) -> Dict[str, Any]:
+    data = _cf_request(
+        "GET",
+        "/zones",
+        api_token,
+        params={"name": base_domain, "per_page": 50},
+    )
+    zones = data.get("result") or []
+    normalized = base_domain.strip().lower()
+    exact = [z for z in zones if str(z.get("name") or "").strip().lower() == normalized]
+    if not exact:
+        raise RuntimeError(f"未找到主域名对应的 Cloudflare Zone: {base_domain}")
+    if len(exact) > 1:
+        raise RuntimeError(f"找到多个同名 Zone，无法自动确定: {base_domain}")
+    return exact[0]
+
+
+def _parse_mail_domain_list(raw: str) -> List[str]:
+    return [item.strip() for item in str(raw or "").split(",") if item.strip()]
+
+
+def _random_subdomain_prefix(length: int = 12) -> str:
+    alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    return "oc" + "".join(secrets.choice(alphabet) for _ in range(max(4, length)))
+
+
+def _cf_list_dns_records(zone_id: str, api_token: str, per_page: int = 1000) -> List[Dict[str, Any]]:
+    page = 1
+    all_records: List[Dict[str, Any]] = []
+    while True:
+        data = _cf_request(
+            "GET",
+            f"/zones/{zone_id}/dns_records",
+            api_token,
+            params={"page": page, "per_page": per_page},
+        )
+        all_records.extend(data.get("result") or [])
+        result_info = data.get("result_info") or {}
+        total_pages = int(result_info.get("total_pages") or 1)
+        if page >= total_pages:
+            break
+        page += 1
+    return all_records
+
+
+def _cf_print_subdomains(zone_id: str, base_domain: str, api_token: str) -> List[str]:
+    records = _cf_list_dns_records(zone_id, api_token)
+    suffix = f".{base_domain.strip('.').lower()}"
+    names = sorted({
+        str(record.get("name") or "").lower()
+        for record in records
+        if str(record.get("name") or "").lower().endswith(suffix)
+        and str(record.get("name") or "").lower() != base_domain.strip('.').lower()
+    })
+    print("Cloudflare 当前子域列表:")
+    if names:
+        for item in names:
+            print(f"  - {item}")
+    else:
+        print("  - (空)")
+    return names
+
+
+def _cf_delete_domain_dns(zone_id: str, full_domain: str, api_token: str) -> int:
+    records = _cf_list_dns_records(zone_id, api_token)
+    target = full_domain.strip().lower()
+    matched = [record for record in records if str(record.get("name") or "").lower() == target]
+    for record in matched:
+        _cf_request(
+            "DELETE",
+            f"/zones/{zone_id}/dns_records/{record['id']}",
+            api_token,
+        )
+    return len(matched)
+
+
+def _cf_create_dns_record(zone_id: str, record: Dict[str, Any], api_token: str) -> None:
+    payload: Dict[str, Any] = {
+        "type": record.get("type"),
+        "name": record.get("name"),
+        "content": record.get("content"),
+    }
+    if record.get("ttl") is not None:
+        payload["ttl"] = record.get("ttl")
+    if record.get("priority") is not None:
+        payload["priority"] = record.get("priority")
+    if record.get("proxied") is not None:
+        payload["proxied"] = record.get("proxied")
+
+    _cf_request(
+        "POST",
+        f"/zones/{zone_id}/dns_records",
+        api_token,
+        payload=payload,
+    )
+
+
+def _cf_clone_domain_dns(zone_id: str, source_domain: str, target_domain: str, api_token: str) -> int:
+    existing_records = _cf_list_dns_records(zone_id, api_token)
+    existing_keys = {
+        (
+            str(item.get("type") or "").upper(),
+            str(item.get("name") or "").lower(),
+            str(item.get("content") or "").strip().lower(),
+            int(item.get("priority") or 0),
+        )
+        for item in existing_records
+    }
+
+    source_lower = source_domain.strip().lower()
+    target_lower = target_domain.strip().lower()
+    source_records = []
+    for item in existing_records:
+        name = str(item.get("name") or "").strip().lower()
+        if name != source_lower:
+            continue
+        record_type = str(item.get("type") or "").upper()
+        if record_type not in {"MX", "TXT"}:
+            continue
+        source_records.append(item)
+
+    if not source_records:
+        raise RuntimeError(f"未找到可复制的样板 DNS 记录: {source_domain}")
+
+    created = 0
+    for raw_record in source_records:
+        record = {
+            "type": raw_record.get("type"),
+            "name": target_lower,
+            "content": raw_record.get("content"),
+            "ttl": raw_record.get("ttl"),
+            "priority": raw_record.get("priority"),
+            "proxied": raw_record.get("proxied"),
+        }
+        key = (
+            str(record.get("type") or "").upper(),
+            str(record.get("name") or "").lower(),
+            str(record.get("content") or "").strip().lower(),
+            int(record.get("priority") or 0),
+        )
+        if key in existing_keys:
+            print(f"已存在 DNS，跳过: {record.get('type')} {record.get('name')} -> {record.get('content')}")
+            continue
+        _cf_create_dns_record(zone_id, record, api_token)
+        created += 1
+        print(f"已创建 DNS: {record.get('type')} {record.get('name')} -> {record.get('content')}")
+    return created
+
+
+def _cf_get_worker_settings(account_id: str, worker_name: str, api_token: str) -> Dict[str, Any]:
+    data = _cf_request(
+        "GET",
+        f"/accounts/{account_id}/workers/scripts/{worker_name}/settings",
+        api_token,
+    )
+    return data.get("result") or {}
+
+
+def _cf_update_worker_mail_domain(account_id: str, worker_name: str, new_value: str, api_token: str) -> None:
+    settings = _cf_get_worker_settings(account_id, worker_name, api_token)
+    bindings = list(settings.get("bindings") or [])
+    updated = False
+    for binding in bindings:
+        if binding.get("name") == "MAIL_DOMAIN":
+            binding["text"] = new_value
+            updated = True
+            break
+    if not updated:
+        bindings.append({"type": "plain_text", "name": "MAIL_DOMAIN", "text": new_value})
+
+    payload: Dict[str, Any] = {"bindings": bindings}
+    for key in (
+        "compatibility_date",
+        "compatibility_flags",
+        "usage_model",
+        "limits",
+        "placement",
+        "tail_consumers",
+        "logpush",
+        "observability",
+    ):
+        if key in settings:
+            payload[key] = settings[key]
+
+    mime = CurlMime()
+    mime.addpart(
+        "settings",
+        content_type="application/json",
+        filename="settings.json",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+    )
+
+    resp = requests.request(
+        "PATCH",
+        f"{CF_API_BASE}/accounts/{account_id}/workers/scripts/{worker_name}/settings",
+        headers={"Authorization": f"Bearer {api_token}"},
+        multipart=mime,
+        impersonate="chrome",
+        timeout=30,
+    )
+    try:
+        data = resp.json()
+    except Exception:
+        preview = (resp.text or "")[:300]
+        raise RuntimeError(f"Cloudflare Worker 设置更新响应异常: HTTP {resp.status_code} {preview}")
+    if resp.status_code < 200 or resp.status_code >= 300 or not data.get("success", False):
+        errors = data.get("errors") or []
+        err_msg = "; ".join(str(x.get("message") or x) for x in errors) if errors else (resp.text or "")[:300]
+        raise RuntimeError(f"Cloudflare Worker 设置更新失败: HTTP {resp.status_code} {err_msg}")
+
+    verify = _cf_get_worker_settings(account_id, worker_name, api_token)
+    verify_bindings = verify.get("bindings") or []
+    verify_binding = next((b for b in verify_bindings if b.get("name") == "MAIL_DOMAIN"), None)
+    verify_value = str((verify_binding or {}).get("text") or "").strip()
+    if verify_value != new_value:
+        raise RuntimeError(f"Worker MAIL_DOMAIN 校验失败，当前值仍为: {verify_value or '(空)'}")
+
+
+def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
+    cf_token = str(args.cf_api_token or "").strip()
+
+    required = [
+        args.cf_worker_name,
+        args.cf_base_domain,
+    ]
+    if not cf_token or not all(required):
+        print("Cloudflare 邮箱域名配置参数不完整，跳过 CF 邮箱配置")
+        return None
+
+    try:
+        zone = _cf_find_zone(args.cf_base_domain, cf_token)
+        zone_id = str(zone.get("id") or "").strip()
+        if not zone_id:
+            raise RuntimeError("自动查询 Zone ID 失败")
+        print(f"自动获取 Zone ID 成功: {zone_id}")
+
+        account_id = str((zone.get("account") or {}).get("id") or "").strip()
+        if not account_id:
+            raise RuntimeError("自动查询 Account ID 失败")
+        print(f"自动获取 Account ID 成功: {account_id}")
+
+        subdomains = _cf_print_subdomains(zone_id, args.cf_base_domain, cf_token)
+        settings = _cf_get_worker_settings(account_id, args.cf_worker_name, cf_token)
+        bindings = settings.get("bindings") or []
+        mail_domain_binding = next((b for b in bindings if b.get("name") == "MAIL_DOMAIN"), None)
+        if not mail_domain_binding:
+            raise RuntimeError("Worker 中未找到 MAIL_DOMAIN 环境变量")
+
+        current_mail_domain = str(mail_domain_binding.get("text") or "").strip()
+        if not current_mail_domain:
+            raise RuntimeError("Worker 的 MAIL_DOMAIN 为空，无法执行轮换")
+
+        domains = _parse_mail_domain_list(current_mail_domain)
+        if not domains:
+            raise RuntimeError("MAIL_DOMAIN 中没有可用域名")
+
+        first_domain = domains[0]
+        print(f"当前 Worker MAIL_DOMAIN: {current_mail_domain}")
+        print(f"MAIL_DOMAIN 首个域名: {first_domain}")
+
+        clone_source = next((item for item in domains if item.lower().endswith(f".{args.cf_base_domain.strip('.').lower()}") and item.lower() in set(subdomains)), None)
+        if not clone_source:
+            clone_source = next((item for item in subdomains if not item.startswith("_") and not item.split(".", 1)[0].startswith("cf2024-")), None)
+        if not clone_source:
+            raise RuntimeError("未找到可用于复制 DNS 的样板子域")
+        print(f"DNS 样板子域: {clone_source}")
+
+        new_prefix = _random_subdomain_prefix()
+        new_domain = f"{new_prefix}.{args.cf_base_domain.strip('.')}"
+        print(f"开始复制样板 DNS 到新子域: {new_domain}")
+        created_count = _cf_clone_domain_dns(zone_id, clone_source, new_domain, cf_token)
+        print(f"新子域 DNS 复制完成: {new_domain} (新建 {created_count} 条)")
+
+        base_suffix = f".{args.cf_base_domain.strip('.').lower()}"
+        if first_domain.lower().endswith(base_suffix):
+            if first_domain.lower() in set(subdomains):
+                deleted_count = _cf_delete_domain_dns(zone_id, first_domain, cf_token)
+                print(f"已删除被替换旧子域 DNS: {first_domain} ({deleted_count} 条)")
+            updated_domains = [new_domain] + domains[1:]
+        else:
+            updated_domains = [new_domain] + domains
+        updated_mail_domain = ",".join(updated_domains)
+        try:
+            _cf_update_worker_mail_domain(account_id, args.cf_worker_name, updated_mail_domain, cf_token)
+            print(f"已更新 Worker MAIL_DOMAIN: {updated_mail_domain}")
+            print("已触发 Worker 配置更新")
+        except Exception as worker_err:
+            print(f"[Warn] Worker MAIL_DOMAIN 更新失败，请手动更新为: {updated_mail_domain}")
+            print(f"[Warn] Worker 更新错误: {worker_err}")
+        return new_domain
+    except Exception as e:
+        print(f"[Warn] Cloudflare 邮箱配置失败，跳过本步骤: {e}")
+        return None
 
 
 def get_domains(proxies: Any = None) -> List[str]:
@@ -1783,6 +2141,9 @@ async def main():
     parser.add_argument("--proxy", default=None, help="代理地址")
     parser.add_argument("--domain-index", type=int, default=DEFAULT_DOMAIN_INDEX, help="邮箱域名索引")
     parser.add_argument("--domain", default=None, help="指定邮箱域名（如 mail.example.com），优先级高于 --domain-index")
+    parser.add_argument("--cf-api-token", default=None, help="Cloudflare API Token")
+    parser.add_argument("--cf-worker-name", default=None, help="Cloudflare Worker 名称")
+    parser.add_argument("--cf-base-domain", default=None, help="Cloudflare 主域名，例如 example.com")
     parser.add_argument("--mail-url", default=DEFAULT_MAILFREE_BASE, help="邮箱服务地址（默认 https://mailfree.smanx.xx.kg）")
     parser.add_argument("--mail-token", default=DEFAULT_JWT_TOKEN, help="邮箱服务授权令牌（默认 auto）")
     parser.add_argument("--count", type=int, default=1, help="注册数量")
@@ -1808,6 +2169,11 @@ async def main():
     global MAILFREE_BASE, JWT_TOKEN
     MAILFREE_BASE = args.mail_url
     JWT_TOKEN = args.mail_token
+
+    prepared_domain = _prepare_cloudflare_mail_domain(args)
+    if prepared_domain:
+        args.domain = prepared_domain
+        print(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}")
 
     base_url = args.target_url or os.environ.get("TARGET_URL", DEFAULT_TARGET_BASE_URL)
     token = args.target_token or os.environ.get("TARGET_TOKEN", DEFAULT_TARGET_TOKEN)
