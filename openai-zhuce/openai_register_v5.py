@@ -1592,7 +1592,19 @@ async def upload_file(client: HttpClient, file_path: str) -> Tuple[bool, str]:
                 continue
 
         except Exception as e:
-            print(f"  ⚠ 上传异常: {e}，60秒后重试")
+            err_str = str(e).lower()
+            if 'timeout' in err_str or 'timed out' in err_str:
+                print(f"  ⚠ 上传超时，验证文件是否已上传...", flush=True)
+                accounts = get_accounts(client)
+                if accounts:
+                    for acc in accounts:
+                        if acc.get('name') == file_name or file_name.startswith(acc.get('name', '').replace('.json', '')):
+                            print(f"  ✓ 文件已存在，验证成功: {file_name}", flush=True)
+                            return True, file_name
+                print(f"  ⚠ 上传超时且文件未找到，60秒后重试", flush=True)
+                time.sleep(60)
+                continue
+            print(f"  ⚠ 上传异常: {e}，60秒后重试", flush=True)
             time.sleep(60)
             continue
 
@@ -1652,12 +1664,14 @@ async def register_accounts_maintenance(
     token: str,
     proxy: str = None
 ) -> Tuple[int, int, bool]:
-    print(f"开始注册 {need_count} 个账号...")
-    print(f"注册总时长限制: {register_timeout:.1f} 秒")
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"{ts} 开始注册 {need_count} 个账号...")
+    print(f"  总运行时长限制: {register_timeout:.1f} 秒")
 
     success_count = 0
     fail_count = 0
     consecutive_fails = 0
+    consecutive_400_fails = 0
     max_consecutive_fails = 3
     register_interval = 1000
     start_time = time.time()
@@ -1667,17 +1681,21 @@ async def register_accounts_maintenance(
     while success_count + fail_count < need_count:
         elapsed = int(time.time() - start_time)
         if elapsed >= register_timeout:
-            print(f"\n[Warn] 注册总时长已达 {register_timeout:.1f} 秒，停止注册")
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"\n{ts} [Warn] 注册总运行时已达 {elapsed}s (限制: {register_timeout}s)，停止注册")
             break
 
         if consecutive_fails >= max_consecutive_fails:
-            print(f"\n[Error] 连续失败 {consecutive_fails} 次，停止注册")
+            ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"\n{ts} [Error] 连续失败 {consecutive_fails} 次，停止注册")
+            if consecutive_400_fails >= max_consecutive_fails:
+                print(f"\n{ts} [Error] 连续 {consecutive_400_fails} 次失败均为 400 错误 (registration_disallowed)，可能是 IP 或邮箱被风控，建议等待一段时间后重试")
             stopped_by_consecutive_fails = True
             break
 
         total_count = success_count + fail_count + 1
         remaining_time = max(0, register_timeout - elapsed)
-        print(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 剩余时间: {remaining_time:.1f}秒) ---")
+        print(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 已运行: {elapsed}s, 剩余: {remaining_time}s) ---")
 
         before_snap = snapshot_token_files()
 
@@ -1884,12 +1902,21 @@ async def main():
             sleep_duration = 60
             round_num = 0
             ever_registered = False
+            start_time = time.time()
+            total_timeout = args.timeout
 
             while True:
                 round_num += 1
+                elapsed = int(time.time() - start_time)
+                remaining = max(0, total_timeout - elapsed)
                 print('\n' + '=' * 60)
-                print(f"第 {round_num} 轮维护")
+                print(f"第 {round_num} 轮维护 (总运行时长: {elapsed}s, 剩余: {remaining}s)")
                 print('=' * 60)
+
+                if elapsed >= total_timeout:
+                    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    print(f"\n{ts} [Warn] 总运行时长已达 {total_timeout} 秒，正常退出")
+                    sys.exit(0)
 
                 valid_count = await check_and_clean_accounts(client, args.quota_threshold, args.concurrency)
                 need_count = args.min_accounts - valid_count
@@ -1905,7 +1932,7 @@ async def main():
 
                 success_count, fail_count, stopped_by_consecutive_fails = await register_accounts_maintenance(
                     need_count,
-                    args.timeout,
+                    remaining,
                     args.domain_index,
                     args.domain,
                     args.concurrency,
