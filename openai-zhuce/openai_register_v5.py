@@ -433,7 +433,7 @@ def poll_verification_code(
     otp_sent_at: Optional[float] = None,
 ) -> str:
     regex = r"(?<!\d)(\d{6})(?!\d)"
-    used = used_codes or set()
+    used: set = set()
     seen_ids: set = set()
     start = time.time()
     last_resend = 0.0
@@ -1584,6 +1584,7 @@ async def register_accounts_maintenance(
     client: HttpClient,
     base_url: str,
     token: str,
+    register_interval: int = 60,
     proxy: str = None
 ) -> Tuple[int, int, bool]:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1595,7 +1596,6 @@ async def register_accounts_maintenance(
     consecutive_fails = 0
     consecutive_400_fails = 0
     max_consecutive_fails = 3
-    register_interval = 1000
     start_time = time.time()
     generated_token_files = {}
     stopped_by_consecutive_fails = False
@@ -1684,8 +1684,8 @@ async def register_accounts_maintenance(
             print(f"  ✗ 注册失败 (连续失败 {consecutive_fails}/{max_consecutive_fails})")
 
         if success_count + fail_count < need_count:
-            print(f"  休息 {register_interval / 1000} 秒后继续...")
-            time.sleep(register_interval / 1000)
+            print(f"  休息 {register_interval} 秒后继续...")
+            time.sleep(register_interval)
 
     print(f"\n注册完成: 成功 {success_count} 个, 失败 {fail_count} 个")
 
@@ -1780,6 +1780,7 @@ async def main():
     parser.add_argument("--workers", type=int, default=1, help="并发线程数")
     parser.add_argument("--sleep-min", type=int, default=5, help="循环模式最短等待秒数")
     parser.add_argument("--sleep-max", type=int, default=30, help="循环模式最长等待秒数")
+    parser.add_argument("--register-interval", type=int, default=60, help="注册间隔时间(秒)")
     parser.add_argument("--save-account", action="store_true", help="保存账号密码")
     parser.add_argument("--target-url", default=DEFAULT_TARGET_BASE_URL, help="目标服务器地址（账号管理服务）")
     parser.add_argument("--target-token", default=DEFAULT_TARGET_TOKEN, help="目标服务器认证令牌")
@@ -1854,6 +1855,7 @@ async def main():
                     client,
                     base_url,
                     token,
+                    args.register_interval,
                     args.proxy
                 )
 
