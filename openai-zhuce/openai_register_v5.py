@@ -164,6 +164,25 @@ def _setup_logger():
 
 log = _setup_logger()
 
+
+def out(message: str, prefix: Optional[str] = None, ts: bool = False, indent: int = 0, flush: bool = True) -> None:
+    parts: List[str] = []
+    if ts:
+        parts.append(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    if prefix:
+        parts.append(prefix)
+    text = " ".join(parts + [str(message)]) if parts else str(message)
+    if indent > 0:
+        text = ("  " * indent) + text
+    print(text, flush=flush)
+
+
+def section(title: str) -> None:
+    line = '=' * 60
+    out(f"\n{line}", flush=True)
+    out(title, flush=True)
+    out(line, flush=True)
+
 DEFAULT_MAILFREE_BASE = "https://mailfree.smanx.xx.kg"
 DEFAULT_JWT_TOKEN = "auto"
 MAILFREE_BASE = DEFAULT_MAILFREE_BASE
@@ -474,12 +493,12 @@ def _cf_print_subdomains(zone_id: str, base_domain: str, api_token: str) -> List
         if str(record.get("name") or "").lower().endswith(suffix)
         and str(record.get("name") or "").lower() != base_domain.strip('.').lower()
     })
-    print("[CF] 当前子域列表:")
+    out("当前子域列表:", prefix="[CF]")
     if names:
         for item in names:
-            print(f"  - {item}")
+            out(f"- {item}", indent=1)
     else:
-        print("  - (空)")
+        out("- (空)", indent=1)
     return names
 
 
@@ -635,11 +654,11 @@ def _cf_clone_domain_dns(zone_id: str, source_domain: str, target_domain: str, a
             int(record.get("priority") or 0),
         )
         if key in existing_keys:
-            print(f"已存在 DNS，跳过: {record.get('type')} {record.get('name')} -> {record.get('content')}")
+            out(f"已存在 DNS，跳过: {record.get('type')} {record.get('name')} -> {record.get('content')}", prefix="[CF]")
             continue
         _cf_create_dns_record(zone_id, record, api_token)
         created += 1
-        print(f"已创建 DNS: {record.get('type')} {record.get('name')} -> {record.get('content')}")
+        out(f"已创建 DNS: {record.get('type')} {record.get('name')} -> {record.get('content')}", prefix="[CF]")
     return created
 
 
@@ -667,7 +686,7 @@ def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
         args.cf_base_domain,
     ]
     if not cf_token or not all(required):
-        print("Cloudflare 邮箱域名配置参数不完整，跳过 CF 邮箱配置")
+        out("Cloudflare 邮箱域名配置参数不完整，跳过 CF 邮箱配置", prefix="[CF]")
         return None
 
     try:
@@ -675,12 +694,12 @@ def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
         zone_id = str(zone.get("id") or "").strip()
         if not zone_id:
             raise RuntimeError("自动查询 Zone ID 失败")
-        print(f"[CF] 自动获取 Zone ID 成功: {zone_id}")
+        out(f"自动获取 Zone ID 成功: {zone_id}", prefix="[CF]")
 
         account_id = str((zone.get("account") or {}).get("id") or "").strip()
         if not account_id:
             raise RuntimeError("自动查询 Account ID 失败")
-        print(f"[CF] 自动获取 Account ID 成功: {account_id}")
+        out(f"自动获取 Account ID 成功: {account_id}", prefix="[CF]")
 
         subdomains = _cf_print_subdomains(zone_id, args.cf_base_domain, cf_token)
         settings = _cf_get_worker_settings(account_id, args.cf_worker_name, cf_token)
@@ -698,33 +717,33 @@ def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
             raise RuntimeError("MAIL_DOMAIN 中没有可用域名")
 
         first_domain = domains[0]
-        print(f"[CF] 当前 Worker MAIL_DOMAIN: {current_mail_domain}")
-        print(f"[CF] MAIL_DOMAIN 首个域名: {first_domain}")
+        out(f"当前 Worker MAIL_DOMAIN: {current_mail_domain}", prefix="[CF]")
+        out(f"MAIL_DOMAIN 首个域名: {first_domain}", prefix="[CF]")
 
         clone_source = next((item for item in domains if item.lower().endswith(f".{args.cf_base_domain.strip('.').lower()}") and item.lower() in set(subdomains)), None)
         if not clone_source:
             clone_source = next((item for item in subdomains if not item.startswith("_") and not item.split(".", 1)[0].startswith("cf2024-")), None)
         if not clone_source:
             raise RuntimeError("未找到可用于复制 DNS 的样板子域")
-        print(f"[CF] DNS 样板子域: {clone_source}")
+        out(f"DNS 样板子域: {clone_source}", prefix="[CF]")
 
         new_prefix = _random_subdomain_prefix()
         new_domain = f"{new_prefix}.{args.cf_base_domain.strip('.')}"
-        print(f"[CF] 开始复制样板 DNS 到新子域: {new_domain}")
+        out(f"开始复制样板 DNS 到新子域: {new_domain}", prefix="[CF]")
         created_count = _cf_clone_domain_dns(zone_id, clone_source, new_domain, cf_token)
-        print(f"[CF] 新子域 DNS 复制完成: {new_domain} (新建 {created_count} 条)")
+        out(f"新子域 DNS 复制完成: {new_domain} (新建 {created_count} 条)", prefix="[CF]")
 
         base_suffix = f".{args.cf_base_domain.strip('.').lower()}"
         if first_domain.lower().endswith(base_suffix):
             if first_domain.lower() in set(subdomains):
                 deleted_count = _cf_delete_domain_dns(zone_id, first_domain, cf_token)
-                print(f"[CF] 已删除被替换旧子域 DNS: {first_domain} ({deleted_count} 条)")
+                out(f"已删除被替换旧子域 DNS: {first_domain} ({deleted_count} 条)", prefix="[CF]")
             updated_domains = [new_domain] + domains[1:]
         else:
             updated_domains = [new_domain] + domains
         updated_mail_domain = ",".join(updated_domains)
         try:
-            print(f"[CF] 开始更新 Worker MAIL_DOMAIN")
+            out("开始更新 Worker MAIL_DOMAIN", prefix="[CF]")
             _cf_update_worker_mail_domain(
                 account_id,
                 args.cf_worker_name,
@@ -733,21 +752,21 @@ def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
                 verify_timeout=max(1, int(args.worker_verify_timeout)),
                 verify_interval=max(1, int(args.worker_verify_interval)),
             )
-            print(f"[CF] 已更新 Worker MAIL_DOMAIN: {updated_mail_domain}")
-            print("[CF] Worker 配置已完成更新并通过校验")
+            out(f"已更新 Worker MAIL_DOMAIN: {updated_mail_domain}", prefix="[CF]")
+            out("Worker 配置已完成更新并通过校验", prefix="[CF]")
         except Exception as worker_err:
-            print(f"[Warn] [CF] Worker MAIL_DOMAIN 更新失败，请手动更新为: {updated_mail_domain}")
-            print(f"[Warn] [CF] Worker 更新错误: {worker_err}")
+            out(f"Worker MAIL_DOMAIN 更新失败，请手动更新为: {updated_mail_domain}", prefix="[Warn] [CF]")
+            out(f"Worker 更新错误: {worker_err}", prefix="[Warn] [CF]")
 
         domain_ready_timeout = max(1, int(args.domain_ready_timeout))
         domain_ready_interval = max(1, int(args.domain_ready_interval))
-        print(f"[MAIL] 等待邮箱服务识别新域名: {new_domain} (超时 {domain_ready_timeout}s, 间隔 {domain_ready_interval}s)")
+        out(f"等待邮箱服务识别新域名: {new_domain} (超时 {domain_ready_timeout}s, 间隔 {domain_ready_interval}s)", prefix="[MAIL]")
         if not wait_for_domain_available(new_domain, timeout=domain_ready_timeout, interval=domain_ready_interval):
             raise RuntimeError(f"邮箱服务在 {domain_ready_timeout} 秒内仍未识别新域名: {new_domain}")
-        print(f"[MAIL] 邮箱服务已识别新域名: {new_domain}")
+        out(f"邮箱服务已识别新域名: {new_domain}", prefix="[MAIL]")
         return new_domain
     except Exception as e:
-        print(f"[Warn] [CF] Cloudflare 邮箱配置失败，跳过本步骤: {e}")
+        out(f"Cloudflare 邮箱配置失败，跳过本步骤: {e}", prefix="[Warn] [CF]")
         return None
 
 
@@ -1920,7 +1939,7 @@ async def upload_file(client: HttpClient, file_path: str) -> Tuple[bool, str]:
     while True:
         attempt += 1
         try:
-            print(f"  ↗ 开始上传: {file_name} (尝试 {attempt})")
+            out(f"↗ 开始上传: {file_name} (尝试 {attempt})", indent=1, prefix="[UPLOAD]")
             resp = requests.post(
                 url,
                 headers={
@@ -1941,7 +1960,7 @@ async def upload_file(client: HttpClient, file_path: str) -> Tuple[bool, str]:
                     if resp_data.get('status') in ('ok', 'success') or not resp_data:
                         return True, file_name
                     elif resp_data.get('error'):
-                        print(f"  ⚠ 上传响应异常: 服务端错误: {resp_data.get('error')}，60秒后重试")
+                        out(f"⚠ 上传响应异常: 服务端错误: {resp_data.get('error')}，60秒后重试", indent=1, prefix="[UPLOAD]")
                         time.sleep(60)
                         continue
                     else:
@@ -1950,24 +1969,24 @@ async def upload_file(client: HttpClient, file_path: str) -> Tuple[bool, str]:
                     return True, file_name
             else:
                 err_preview = response_body[:200].replace('\n', ' ')
-                print(f"  ⚠ 上传响应异常: HTTP {status_code} {err_preview}，60秒后重试")
+                out(f"⚠ 上传响应异常: HTTP {status_code} {err_preview}，60秒后重试", indent=1, prefix="[UPLOAD]")
                 time.sleep(60)
                 continue
 
         except Exception as e:
             err_str = str(e).lower()
             if 'timeout' in err_str or 'timed out' in err_str:
-                print(f"  ⚠ 上传超时，验证文件是否已上传...", flush=True)
+                out("⚠ 上传超时，验证文件是否已上传...", indent=1, prefix="[UPLOAD]")
                 accounts = get_accounts(client)
                 if accounts:
                     for acc in accounts:
                         if acc.get('name') == file_name or file_name.startswith(acc.get('name', '').replace('.json', '')):
-                            print(f"  ✓ 文件已存在，验证成功: {file_name}", flush=True)
+                            out(f"✓ 文件已存在，验证成功: {file_name}", indent=1, prefix="[UPLOAD]")
                             return True, file_name
-                print(f"  ⚠ 上传超时且文件未找到，60秒后重试", flush=True)
+                out("⚠ 上传超时且文件未找到，60秒后重试", indent=1, prefix="[UPLOAD]")
                 time.sleep(60)
                 continue
-            print(f"  ⚠ 上传异常: {e}，60秒后重试", flush=True)
+            out(f"⚠ 上传异常: {e}，60秒后重试", indent=1, prefix="[UPLOAD]")
             time.sleep(60)
             continue
 
@@ -2032,8 +2051,8 @@ async def register_accounts_maintenance(
     consecutive_400_fails: int = 0,
 ) -> Tuple[int, int, bool, int, int]:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{ts} 开始注册 {need_count} 个账号...")
-    print(f"  总运行时长限制: {register_timeout:.1f} 秒")
+    out(f"开始注册 {need_count} 个账号...", ts=True)
+    out(f"总运行时长限制: {register_timeout:.1f} 秒", indent=1)
 
     success_count = 0
     fail_count = 0
@@ -2049,19 +2068,19 @@ async def register_accounts_maintenance(
         remaining_time = max(0, int(register_timeout - register_elapsed))
         if register_elapsed >= register_timeout:
             ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f"\n{ts} [Warn] 注册阶段运行时已达 {register_elapsed}s (限制: {register_timeout}s)，停止注册")
+            out(f"注册阶段运行时已达 {register_elapsed}s (限制: {register_timeout}s)，停止注册", prefix="[Warn]", ts=True)
             break
 
         if consecutive_fails >= max_consecutive_fails:
             ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            print(f"\n{ts} [Error] 连续失败 {consecutive_fails} 次，停止注册")
+            out(f"连续失败 {consecutive_fails} 次，停止注册", prefix="[Error]", ts=True)
             if consecutive_400_fails >= max_consecutive_fails:
-                print(f"\n{ts} [Error] 连续 {consecutive_400_fails} 次失败均为 400 错误 (registration_disallowed)，可能是 IP 或邮箱被风控，建议等待一段时间后重试")
+                out(f"连续 {consecutive_400_fails} 次失败均为 400 错误 (registration_disallowed)，可能是 IP 或邮箱被风控，建议等待一段时间后重试", prefix="[Error]", ts=True)
             stopped_by_consecutive_fails = True
             break
 
         total_count = success_count + fail_count + 1
-        print(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 已运行: {total_elapsed}s, 剩余: {remaining_time}s) ---")
+        out(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 已运行: {total_elapsed}s, 剩余: {remaining_time}s) ---")
 
         before_snap = snapshot_token_files()
 
@@ -2073,7 +2092,7 @@ async def register_accounts_maintenance(
         if result and result.get('token') and new_token_files:
             success_count += 1
             consecutive_fails = 0
-            print(f"  ✓ 注册成功，生成 {len(new_token_files)} 个 token 文件")
+            out(f"✓ 注册成功，生成 {len(new_token_files)} 个 token 文件", indent=1)
             consecutive_400_fails = 0
 
             for file_path in new_token_files:
@@ -2083,10 +2102,10 @@ async def register_accounts_maintenance(
                 upload_success, upload_err = await upload_file(client, file_path)
 
                 if upload_success:
-                    print(f"  ✓ 上传新账号: {file_name}")
+                    out(f"✓ 上传新账号: {file_name}", indent=1)
                     try:
                         os.unlink(file_path)
-                        print(f"  ✓ 已删除本地文件: {file_name}")
+                        out(f"✓ 已删除本地文件: {file_name}", indent=1)
                         del generated_token_files[file_name]
                     except:
                         pass
@@ -2094,14 +2113,14 @@ async def register_accounts_maintenance(
             if result.get('email'):
                 proxies = {"http": proxy, "https": proxy} if proxy else None
                 if delete_mailbox(result['email'], proxies):
-                    print(f"  ✓ 已删除邮箱: {result['email']}")
+                    out(f"✓ 已删除邮箱: {result['email']}", indent=1)
                 else:
-                    print(f"  ✗ 删除邮箱失败: {result['email']}")
+                    out(f"✗ 删除邮箱失败: {result['email']}", indent=1)
         elif result and result.get('token'):
             save_result(result)
             success_count += 1
             consecutive_fails = 0
-            print(f"  ✓ 注册成功")
+            out("✓ 注册成功", indent=1)
             consecutive_400_fails = 0
 
             token_files = [f for f in os.listdir(TOKENS_DIR) if re.match(r'^token.*\.json$', f) and result.get('email', '').replace('@', '_') in f]
@@ -2111,19 +2130,19 @@ async def register_accounts_maintenance(
                 upload_success, upload_err = await upload_file(client, file_path)
 
                 if upload_success:
-                    print(f"  ✓ 上传新账号: {file_name}")
+                    out(f"✓ 上传新账号: {file_name}", indent=1)
                     try:
                         os.unlink(file_path)
-                        print(f"  ✓ 已删除本地文件: {file_name}")
+                        out(f"✓ 已删除本地文件: {file_name}", indent=1)
                     except:
                         pass
 
             if result.get('email'):
                 proxies = {"http": proxy, "https": proxy} if proxy else None
                 if delete_mailbox(result['email'], proxies):
-                    print(f"  ✓ 已删除邮箱: {result['email']}")
+                    out(f"✓ 已删除邮箱: {result['email']}", indent=1)
                 else:
-                    print(f"  ✗ 删除邮箱失败: {result['email']}")
+                    out(f"✗ 删除邮箱失败: {result['email']}", indent=1)
         else:
             fail_count += 1
             consecutive_fails += 1
@@ -2134,51 +2153,50 @@ async def register_accounts_maintenance(
                 consecutive_400_fails += 1
             else:
                 consecutive_400_fails = 0
-            print(f"  ✗ 注册失败 (累计连续失败 {consecutive_fails}/{max_consecutive_fails})")
+            out(f"✗ 注册失败 (累计连续失败 {consecutive_fails}/{max_consecutive_fails})", indent=1)
             if fatal_registration_error:
-                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print(f"\n{ts} [Warn] 检测到致命错误: {fatal_registration_error}，停止后续注册并正常退出")
+                out(f"检测到致命错误: {fatal_registration_error}，停止后续注册并正常退出", prefix="[Warn]", ts=True)
                 stopped_by_consecutive_fails = True
                 break
 
         if success_count + fail_count < need_count:
-            print(f"  本次尝试结束，休息 {register_interval} 秒后继续...")
+            out(f"本次尝试结束，休息 {register_interval} 秒后继续...", ts=True)
             time.sleep(register_interval)
 
-    print(f"\n注册完成: 成功 {success_count} 个, 失败 {fail_count} 个")
+    out(f"\n注册完成: 成功 {success_count} 个, 失败 {fail_count} 个")
 
     pending = [p for f, p in generated_token_files.items() if os.path.exists(p)]
     if pending:
-        print(f"\n检测到 {len(pending)} 个未上传的 token 文件，开始补传...")
+        out(f"\n检测到 {len(pending)} 个未上传的 token 文件，开始补传...", prefix="[UPLOAD]")
         for file_path in pending:
             file_name = os.path.basename(file_path)
             upload_success, _ = await upload_file(client, file_path)
             if upload_success:
-                print(f"  ✓ 补传成功: {file_name}")
+                out(f"✓ 补传成功: {file_name}", indent=1, prefix="[UPLOAD]")
                 try:
                     os.unlink(file_path)
-                    print(f"  ✓ 已删除本地文件: {file_name}")
+                    out(f"✓ 已删除本地文件: {file_name}", indent=1, prefix="[UPLOAD]")
                 except:
                     pass
             else:
-                print(f"  ✗ 补传失败: {file_name}")
+                out(f"✗ 补传失败: {file_name}", indent=1, prefix="[UPLOAD]")
 
     return success_count, fail_count, stopped_by_consecutive_fails, consecutive_fails, consecutive_400_fails
 
 
 async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, concurrency: int) -> int:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"\n{ts} --- 检测账号状态 ---")
+    out("--- 检测账号状态 ---", ts=True)
     check_start_time = time.time()
 
     accounts = get_accounts(client)
     if not accounts:
-        print(f"{ts} 获取账号列表失败")
+        out("获取账号列表失败", ts=True)
         return 0
 
     codex_accounts = [acc for acc in accounts if acc.get('provider') == 'codex']
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{ts} 当前 codex 账号: {len(codex_accounts)} 个", flush=True)
+    out(f"当前 codex 账号: {len(codex_accounts)} 个", ts=True)
 
     if not codex_accounts:
         return 0
@@ -2190,14 +2208,14 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
     ok = [r for r in check_results if not r.get('invalid_401') and not r.get('low_quota') and not r.get('error')]
     elapsed_values = [r.get('elapsed_seconds') for r in check_results if isinstance(r.get('elapsed_seconds'), (int, float))]
 
-    print(f"  - 401 失效: {len(invalid_401)} 个", flush=True)
-    print(f"  - 额度不足: {len(low_quota)} 个", flush=True)
-    print(f"  - 正常: {len(ok)} 个", flush=True)
+    out(f"- 401 失效: {len(invalid_401)} 个", indent=1)
+    out(f"- 额度不足: {len(low_quota)} 个", indent=1)
+    out(f"- 正常: {len(ok)} 个", indent=1)
     if elapsed_values:
         avg_elapsed = sum(elapsed_values) / len(elapsed_values)
         max_elapsed = max(elapsed_values)
         min_elapsed = min(elapsed_values)
-        print(f"  - 单账号耗时: avg={avg_elapsed:.2f}s min={min_elapsed:.2f}s max={max_elapsed:.2f}s", flush=True)
+        out(f"- 单账号耗时: avg={avg_elapsed:.2f}s min={min_elapsed:.2f}s max={max_elapsed:.2f}s", indent=1)
 
     to_delete = []
 
@@ -2211,18 +2229,18 @@ async def check_and_clean_accounts(client: HttpClient, quota_threshold: float, c
             to_delete.append({'name': acc['name'], 'reason': f'quota<{quota_threshold}% (remain={remain_str})'})
 
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"\n{ts} 删除 {len(to_delete)} 个失效账号...", flush=True)
+    out(f"删除 {len(to_delete)} 个失效账号...", ts=True)
     for acc in to_delete:
         try:
             if delete_account(client, acc['name']):
-                print(f"  ✓ 删除: {acc['name']} ({acc['reason']})", flush=True)
+                out(f"✓ 删除: {acc['name']} ({acc['reason']})", indent=1)
             else:
-                print(f"  ✗ 删除失败: {acc['name']}", flush=True)
+                out(f"✗ 删除失败: {acc['name']}", indent=1)
         except Exception as e:
-            print(f"  ✗ 删除异常: {acc['name']} - {e}")
+            out(f"✗ 删除异常: {acc['name']} - {e}", indent=1)
 
     total_check_elapsed = time.time() - check_start_time
-    print(f"  - 检测总耗时: {total_check_elapsed:.1f}s")
+    out(f"- 检测总耗时: {total_check_elapsed:.1f}s", indent=1)
 
     return len(ok)
 
@@ -2270,7 +2288,7 @@ async def main():
     prepared_domain = _prepare_cloudflare_mail_domain(args)
     if prepared_domain:
         args.domain = prepared_domain
-        print(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}")
+        out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
 
     base_url = args.target_url or os.environ.get("TARGET_URL", DEFAULT_TARGET_BASE_URL)
     token = args.target_token or os.environ.get("TARGET_TOKEN", DEFAULT_TARGET_TOKEN)
@@ -2298,26 +2316,24 @@ async def main():
                 round_num += 1
                 elapsed = int(time.time() - script_start_time)
                 remaining = max(0, total_timeout - elapsed)
-                print('\n' + '=' * 60)
-                print(f"第 {round_num} 轮维护 (总运行时长: {elapsed}s, 剩余: {remaining}s)")
-                print('=' * 60)
+                section(f"第 {round_num} 轮维护 (总运行时长: {elapsed}s, 剩余: {remaining}s)")
 
                 if elapsed >= total_timeout:
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    print(f"\n{ts} [Warn] 总运行时长已达 {total_timeout} 秒，正常退出")
+                    out(f"总运行时长已达 {total_timeout} 秒，正常退出", prefix="[Warn]", ts=True)
                     sys.exit(0)
 
                 valid_count = await check_and_clean_accounts(client, args.quota_threshold, args.concurrency)
                 need_count = args.min_accounts - valid_count
-                print(f"\n当前有效 codex 账号: {valid_count} 个，阈值: {args.min_accounts}")
+                out(f"\n当前有效 codex 账号: {valid_count} 个，阈值: {args.min_accounts}")
 
                 if need_count < 1:
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    print(f"\n{ts} 账号充足 (>= {args.min_accounts})，等待 {sleep_duration} 秒后继续检测...", flush=True)
+                    out(f"账号充足 (>= {args.min_accounts})，等待 {sleep_duration} 秒后继续检测...", ts=True)
                     time.sleep(sleep_duration)
                     continue
 
-                print(f"\n需要注册 {need_count} 个账号...")
+                out(f"\n需要注册 {need_count} 个账号...")
 
                 success_count, fail_count, stopped_by_consecutive_fails, maintenance_consecutive_fails, maintenance_consecutive_400_fails = await register_accounts_maintenance(
                     need_count,
@@ -2337,15 +2353,13 @@ async def main():
 
                 ever_registered = True
 
-                print('\n' + '=' * 60)
-                print('本轮申请完成，返回检测流程')
-                print('=' * 60)
-                print(f"成功: {success_count} 个, 失败: {fail_count} 个")
+                section('本轮申请完成，返回检测流程')
+                out(f"成功: {success_count} 个, 失败: {fail_count} 个")
                 if stopped_by_consecutive_fails:
                     if maintenance_consecutive_fails >= 3:
-                        print("连续失败达到阈值，退出维护循环")
+                        out("连续失败达到阈值，退出维护循环")
                     else:
-                        print("检测到致命注册错误，正常退出维护循环")
+                        out("检测到致命注册错误，正常退出维护循环")
                     return
                 continue
 
