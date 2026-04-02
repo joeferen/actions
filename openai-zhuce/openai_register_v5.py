@@ -2061,7 +2061,7 @@ async def register_accounts_maintenance(
             print(f"  ✗ 注册失败 (累计连续失败 {consecutive_fails}/{max_consecutive_fails})")
 
         if success_count + fail_count < need_count:
-            print(f"  休息 {register_interval} 秒后继续...")
+            print(f"  本次尝试结束，休息 {register_interval} 秒后继续...")
             time.sleep(register_interval)
 
     print(f"\n注册完成: 成功 {success_count} 个, 失败 {fail_count} 个")
