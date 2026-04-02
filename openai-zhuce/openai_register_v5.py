@@ -57,6 +57,7 @@ Cloudflare API Token 最小权限建议：
   --min-accounts      账号数量阈值（默认 100）
   --quota-threshold   额度不足删除阈值百分比（默认 20）
   --concurrency       检测账号并发数（默认 50）
+  --maintenance-interval 账号充足时的维护检测间隔（秒，默认 60）
   --mode              运行模式：
                        register = 仅注册
                        maintenance = 仅维护
@@ -95,7 +96,10 @@ python openai_register_v5.py --mode maintenance --min-accounts 100
 # 9. 自定义参数
 python openai_register_v5.py --mode both --target-url https://api.example.com --target-token YOUR_TOKEN --quota-threshold 15 --timeout 3600 --concurrency 30
 
-# 10. 启用 Cloudflare 子域轮换后再继续注册
+# 10. 维护模式 - 自定义检测间隔
+python openai_register_v5.py --mode maintenance --min-accounts 50 --maintenance-interval 120
+
+# 11. 启用 Cloudflare 子域轮换后再继续注册
 python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worker-name YOUR_WORKER_NAME --cf-base-domain example.com
 
 ================================================================================
@@ -182,6 +186,12 @@ DEFAULT_TARGET_BASE_URL = ""
 DEFAULT_TARGET_TOKEN = ""
 NOTIFY_BASE_URL = "https://api.day.app/xxxxxxxx"
 CF_API_BASE = "https://api.cloudflare.com/client/v4"
+FATAL_REGISTRATION_ERRORS = [
+    "未找到 workspace_id",
+    "选择 workspace 失败",
+    "未获取到 continue_url",
+    "重定向失败，未获取到回调 URL",
+]
 
 _GIVEN_NAMES = [
     "Liam", "Noah", "Oliver", "James", "Elijah", "William", "Henry", "Lucas",
@@ -253,8 +263,15 @@ def _generate_accept_language() -> str:
         if random.random() < 0.3:
             return f"{parts[0]},*;q=0.5"
         return parts[0]
-    else:
-        return ",".join(parts)
+    return ",".join(parts)
+
+
+def _match_fatal_registration_error(error_text: str) -> Optional[str]:
+    text = str(error_text or "")
+    for item in FATAL_REGISTRATION_ERRORS:
+        if item in text:
+            return item
+    return None
 
 
 def random_name() -> str:
@@ -2053,12 +2070,19 @@ async def register_accounts_maintenance(
         else:
             fail_count += 1
             consecutive_fails += 1
-            error_text = str((result or {}).get('error') or '').lower() if isinstance(result, dict) else ''
+            raw_error_text = str((result or {}).get('error') or '') if isinstance(result, dict) else ''
+            error_text = raw_error_text.lower()
+            fatal_registration_error = _match_fatal_registration_error(raw_error_text)
             if 'registration_disallowed' in error_text or ' 400' in error_text or 'http 400' in error_text:
                 consecutive_400_fails += 1
             else:
                 consecutive_400_fails = 0
             print(f"  ✗ 注册失败 (累计连续失败 {consecutive_fails}/{max_consecutive_fails})")
+            if fatal_registration_error:
+                ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print(f"\n{ts} [Warn] 检测到致命错误: {fatal_registration_error}，停止后续注册并正常退出")
+                stopped_by_consecutive_fails = True
+                break
 
         if success_count + fail_count < need_count:
             print(f"  本次尝试结束，休息 {register_interval} 秒后继续...")
@@ -2169,6 +2193,7 @@ async def main():
     parser.add_argument("--quota-threshold", type=float, default=DEFAULT_QUOTA_THRESHOLD_PERCENT, help="额度不足删除阈值")
     parser.add_argument("--timeout", type=int, default=DEFAULT_REGISTER_TIMEOUT, help="脚本最大运行时长(秒)")
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY, help="并发数")
+    parser.add_argument("--maintenance-interval", type=int, default=60, help="账号充足时的维护检测间隔(秒)")
     parser.add_argument("--notify-url", default=NOTIFY_BASE_URL, help="通知服务地址")
     parser.add_argument("--mode", choices=["register", "maintenance", "both"], default="both", help="运行模式")
 
@@ -2201,7 +2226,7 @@ async def main():
             else:
                 pass
         else:
-            sleep_duration = 60
+            sleep_duration = max(1, int(args.maintenance_interval))
             round_num = 0
             ever_registered = False
             total_timeout = args.timeout
@@ -2256,8 +2281,11 @@ async def main():
                 print('=' * 60)
                 print(f"成功: {success_count} 个, 失败: {fail_count} 个")
                 if stopped_by_consecutive_fails:
-                    print("连续失败达到阈值，退出维护循环")
-                    break
+                    if maintenance_consecutive_fails >= 3:
+                        print("连续失败达到阈值，退出维护循环")
+                    else:
+                        print("检测到致命注册错误，正常退出维护循环")
+                    return
                 continue
 
     if args.mode == "register":
