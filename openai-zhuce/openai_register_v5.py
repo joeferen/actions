@@ -66,6 +66,9 @@ Cloudflare API Token 最小权限建议：
                        register = 仅注册
                        maintenance = 仅维护
                        both = 注册+维护（默认）
+  --max-retry-per-account 每个账号最大重试次数（默认3）
+  --max-consecutive-fails 维护模式最大连续失败次数（默认3）
+  --domains           指定多个邮箱域名，注册失败时会自动切换
 
 ================================================================================
 运行示例
@@ -108,6 +111,15 @@ python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worke
 
 # 12. 自定义 Cloudflare 域名生效和 Worker 校验等待时间
 python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worker-name YOUR_WORKER_NAME --cf-base-domain example.com --domain-ready-timeout 300 --domain-ready-interval 10 --worker-verify-timeout 60 --worker-verify-interval 3
+
+# 13. 使用多个邮箱域名，失败时自动切换
+python openai_register_v5.py --domains mail1.example.com mail2.example.com mail3.example.com --count 10
+
+# 14. 自定义每个账号的最大重试次数
+python openai_register_v5.py --max-retry-per-account 5 --count 1
+
+# 15. 自定义维护模式的最大连续失败次数
+python openai_register_v5.py --mode maintenance --target-url https://api.example.com --target-token YOUR_TOKEN --min-accounts 100 --max-consecutive-fails 10
 
 ================================================================================
 """
