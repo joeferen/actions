@@ -887,81 +887,79 @@ def poll_verification_code(
     resend_fn: Optional[Callable] = None,
     otp_sent_at: Optional[float] = None,
     flow_name: str = "通用流程",
+    max_retries: int = MAX_RETRY_PER_ACCOUNT,
 ) -> str:
     regex = r"(?<!\d)(\d{6})(?!\d)"
     used: set = set(used_codes or set())
     seen_ids: set = set()
     start = time.time()
-    last_resend = 0.0
-    intervals = [3, 4, 5, 6, 8, 10]
-    idx = 0
 
     log.info(f"    📧 [{flow_name}] 等待验证码 ({email})...")
 
-    while time.time() - start < timeout:
-        try:
-            resp = requests.get(
-                f"{MAILFREE_BASE}/api/emails",
-                headers=_mailfree_headers(),
-                params={"mailbox": email, "limit": 10},
-                proxies=proxies,
-                impersonate="chrome",
-                timeout=15,
-            )
+    for resend_attempt in range(max_retries):
+        if resend_attempt > 0:
+            log.info(f"    🔄 [{flow_name}] 正在重试 {resend_attempt}/{max_retries}...")
+            if resend_fn:
+                try:
+                    resend_fn()
+                    log.info(f"    🔄 [{flow_name}] 已重发 OTP")
+                except Exception:
+                    pass
+            time.sleep(2)
 
-            if resp.status_code == 200:
-                emails_data = resp.json()
-                if isinstance(emails_data, list):
-                    for mail in emails_data:
-                        msg_id = mail.get("id")
-                        if not msg_id or msg_id in seen_ids:
-                            continue
-                        seen_ids.add(msg_id)
-
-                        sender = str(mail.get("sender") or "").lower()
-                        subject = str(mail.get("subject") or "")
-                        preview = str(mail.get("preview") or "")
-                        verification_code = mail.get("verification_code")
-
-                        if "openai" not in sender and "openai" not in subject.lower():
-                            detail = get_email_detail(msg_id, proxies)
-                            content = "\n".join([
-                                subject, preview,
-                                str(detail.get("content") or ""),
-                                str(detail.get("html_content") or ""),
-                            ])
-                            if "openai" not in content.lower():
-                                continue
-                            m = re.search(regex, content)
-                        else:
-                            if verification_code:
-                                m = re.match(regex, str(verification_code))
-                            else:
-                                m = re.search(regex, preview)
-
-                        if m:
-                            code = m.group(1)
-                            if code not in used:
-                                used.add(code)
-                                elapsed = int(time.time() - start)
-                                log.info(f"    ✅ [{flow_name}] 验证码: {code} (耗时 {elapsed}s)")
-                                return code
-
-        except Exception as e:
-            log.warning(f"    MailAPI 查询失败: {e}")
-
-        elapsed_now = time.time() - start
-        if resend_fn and elapsed_now > 20 and (elapsed_now - last_resend) > OTP_RESEND_INTERVAL:
+        while time.time() - start < timeout:
             try:
-                resend_fn()
-                last_resend = elapsed_now
-                log.info(f"    🔄 [{flow_name}] 已重发 OTP")
-            except Exception:
-                pass
+                resp = requests.get(
+                    f"{MAILFREE_BASE}/api/emails",
+                    headers=_mailfree_headers(),
+                    params={"mailbox": email, "limit": 10},
+                    proxies=proxies,
+                    impersonate="chrome",
+                    timeout=15,
+                )
 
-        wait = intervals[min(idx, len(intervals) - 1)]
-        idx += 1
-        time.sleep(wait)
+                if resp.status_code == 200:
+                    emails_data = resp.json()
+                    if isinstance(emails_data, list):
+                        for mail in emails_data:
+                            msg_id = mail.get("id")
+                            if not msg_id or msg_id in seen_ids:
+                                continue
+                            seen_ids.add(msg_id)
+
+                            sender = str(mail.get("sender") or "").lower()
+                            subject = str(mail.get("subject") or "")
+                            preview = str(mail.get("preview") or "")
+                            verification_code = mail.get("verification_code")
+
+                            if "openai" not in sender and "openai" not in subject.lower():
+                                detail = get_email_detail(msg_id, proxies)
+                                content = "\n".join([
+                                    subject, preview,
+                                    str(detail.get("content") or ""),
+                                    str(detail.get("html_content") or ""),
+                                ])
+                                if "openai" not in content.lower():
+                                    continue
+                                m = re.search(regex, content)
+                            else:
+                                if verification_code:
+                                    m = re.match(regex, str(verification_code))
+                                else:
+                                    m = re.search(regex, preview)
+
+                            if m:
+                                code = m.group(1)
+                                if code not in used:
+                                    used.add(code)
+                                    elapsed = int(time.time() - start)
+                                    log.info(f"    ✅ [{flow_name}] 验证码: {code} (耗时 {elapsed}s)")
+                                    return code
+
+            except Exception as e:
+                log.warning(f"    MailAPI 查询失败: {e}")
+
+            time.sleep(3)
 
     raise TimeoutError(f"验证码超时 ({timeout}s)")
 
@@ -1252,15 +1250,16 @@ def register_account(
 
         device_id = s.get_cookie("oai-did") or ""
         ua = s._session.headers.get("User-Agent", "Mozilla/5.0")
-        sentinel = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
+        sentinel_signup = get_sentinel_header(device_id, ua, "authorize_continue", proxies)
 
+        signup_headers = {
+            "Referer": "https://auth.openai.com/create-account",
+            "openai-sentinel-token": sentinel_signup,
+        }
         signup_resp = s.post_json(
             "https://auth.openai.com/api/accounts/authorize/continue",
             {"username": {"value": email, "kind": "email"}, "screen_hint": "signup"},
-            headers={
-                "Referer": "https://auth.openai.com/create-account",
-                "openai-sentinel-token": sentinel,
-            },
+            headers=signup_headers,
         )
         if signup_resp.status_code < 200 or signup_resp.status_code >= 300:
             raise RuntimeError(f"提交邮箱失败: {signup_resp.status_code}")
@@ -1278,13 +1277,15 @@ def register_account(
         if is_existing_account:
             otp_sent_at = time.time()
         else:
+            sentinel_reg = get_sentinel_header(device_id, ua, "username_password_create", proxies)
+            pwd_headers = {
+                "Referer": "https://auth.openai.com/create-account/password",
+                "openai-sentinel-token": sentinel_reg,
+            }
             pwd_resp = s.post_json(
                 "https://auth.openai.com/api/accounts/user/register",
                 {"password": openai_password, "username": email},
-                headers={
-                    "Referer": "https://auth.openai.com/create-account/password",
-                    "openai-sentinel-token": sentinel,
-                },
+                headers=pwd_headers,
             )
             if pwd_resp.status_code < 200 or pwd_resp.status_code >= 300:
                 raise RuntimeError(f"设置密码失败: {pwd_resp.status_code}")
@@ -1313,6 +1314,7 @@ def register_account(
             resend_fn=_resend,
             otp_sent_at=otp_sent_at,
             flow_name="注册流程",
+            max_retries=MAX_RETRY_PER_ACCOUNT,
         )
 
         human_sleep("type_code")
@@ -1336,10 +1338,16 @@ def register_account(
         else:
             name = random_name()
             birthday = random_birthday()
+
+            sentinel_create = get_sentinel_header(device_id, ua, "create_account", proxies)
+            create_headers = {
+                "Referer": "https://auth.openai.com/about-you",
+                "openai-sentinel-token": sentinel_create,
+            }
             create_resp = s.post_json(
                 "https://auth.openai.com/api/accounts/create_account",
                 {"name": name, "birthdate": birthday},
-                headers={"Referer": "https://auth.openai.com/about-you"},
+                headers=create_headers,
             )
             if create_resp.status_code < 200 or create_resp.status_code >= 300:
                 raise RuntimeError(f"创建账号失败: {create_resp.status_code}")
@@ -1436,6 +1444,7 @@ def _relogin_for_token(
             resend_fn=_resend,
             otp_sent_at=otp_sent_at,
             flow_name="重新登录流程",
+            max_retries=MAX_RETRY_PER_ACCOUNT,
         )
 
         otp_sentinel = get_sentinel_header(device_id, ua, "email_otp_validate", proxies)
@@ -1523,6 +1532,7 @@ def _login_for_token(
                 proxies,
                 resend_fn=_resend,
                 flow_name="登录补 token 流程",
+                max_retries=MAX_RETRY_PER_ACCOUNT,
             )
             if not code:
                 raise RuntimeError("未获取到登录验证码")
