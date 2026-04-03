@@ -68,7 +68,7 @@ Cloudflare API Token 最小权限建议：
                        both = 注册+维护（默认）
   --max-retry-per-account 每个账号最大重试次数（默认3）
   --max-consecutive-fails 维护模式最大连续失败次数（默认3）
-  --domains           指定多个邮箱域名，注册失败时会自动切换
+  --cf-base-domains   指定多个Cloudflare主域名，注册失败时会自动切换，优先级高于--cf-base-domain
 
 ================================================================================
 运行示例
@@ -112,8 +112,8 @@ python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worke
 # 12. 自定义 Cloudflare 域名生效和 Worker 校验等待时间
 python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worker-name YOUR_WORKER_NAME --cf-base-domain example.com --domain-ready-timeout 300 --domain-ready-interval 10 --worker-verify-timeout 60 --worker-verify-interval 3
 
-# 13. 使用多个邮箱域名，失败时自动切换
-python openai_register_v5.py --domains mail1.example.com mail2.example.com mail3.example.com --count 10
+# 13. 使用多个Cloudflare主域名，失败时自动切换
+python openai_register_v5.py --mode both --cf-api-token YOUR_CF_TOKEN --cf-worker-name YOUR_WORKER_NAME --cf-base-domains example1.com example2.com example3.com
 
 # 14. 自定义每个账号的最大重试次数
 python openai_register_v5.py --max-retry-per-account 5 --count 1
@@ -2551,18 +2551,16 @@ async def register_accounts_maintenance(
     register_timeout: float,
     domain_index: int,
     domain_name: str,
-    domains: List[str] = None,
-    concurrency: int = None,
-    client: HttpClient = None,
-    base_url: str = None,
-    token: str = None,
+    concurrency: int,
+    client: HttpClient,
+    base_url: str,
+    token: str,
     register_interval: int = 60,
     proxy: Optional[str] = None,
     global_start_time: Optional[float] = None,
     consecutive_fails: int = 0,
     consecutive_400_fails: int = 0,
     max_consecutive_fails: int = 3,
-    current_domain_index: int = 0,
 ) -> Tuple[int, int, bool, int, int]:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     out(f"开始注册 {need_count} 个账号...", ts=True)
@@ -2571,9 +2569,6 @@ async def register_accounts_maintenance(
     success_count = 0
     fail_count = 0
     start_time = time.time()
-    current_domain_idx = current_domain_index
-    if not domains:
-        domains = []
     overall_start_time = global_start_time or start_time
     generated_token_files = {}
     stopped_by_consecutive_fails = False
@@ -2595,18 +2590,12 @@ async def register_accounts_maintenance(
             stopped_by_consecutive_fails = True
             break
 
-        # Determine which domain to use
-        current_use_domain = domain_name
-        if domains:
-            current_use_domain = domains[current_domain_idx]
-            out(f"使用域名: {current_use_domain}", indent=1)
-
         total_count = success_count + fail_count + 1
         out(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 已运行: {total_elapsed}s, 剩余: {remaining_time}s) ---")
 
         before_snap = snapshot_token_files()
 
-        result = run_one(proxy, domain_index, current_use_domain)
+        result = run_one(proxy, domain_index, domain_name)
 
         after_snap = snapshot_token_files()
         new_token_files = diff_token_files(before_snap, after_snap)
@@ -2668,10 +2657,6 @@ async def register_accounts_maintenance(
         else:
             fail_count += 1
             consecutive_fails += 1
-            # Cycle to next domain if we have multiple domains
-            if domains:
-                current_domain_idx = (current_domain_idx + 1) % len(domains)
-                out(f"注册失败，切换到下一个域名: {domains[current_domain_idx]}", indent=1)
             raw_error_text = str((result or {}).get('error') or '') if isinstance(result, dict) else ''
             error_text = raw_error_text.lower()
             fatal_registration_error = _match_fatal_registration_error(raw_error_text)
@@ -2812,7 +2797,7 @@ async def main():
     parser.add_argument("--mode", choices=["register", "maintenance", "both"], default="both", help="运行模式")
     parser.add_argument("--max-retry-per-account", type=int, default=3, help="每个账号最大重试次数（默认3）")
     parser.add_argument("--max-consecutive-fails", type=int, default=3, help="维护模式最大连续失败次数（默认3）")
-    parser.add_argument("--domains", nargs="*", default=[], help="指定多个邮箱域名，注册失败时会自动切换")
+    parser.add_argument("--cf-base-domains", nargs="*", default=[], help="指定多个Cloudflare主域名，注册失败时循环切换，优先级高于--cf-base-domain")
 
     args = parser.parse_args()
 
@@ -2823,11 +2808,6 @@ async def main():
     MAILFREE_BASE = args.mail_url
     JWT_TOKEN = args.mail_token
     MAX_RETRY_PER_ACCOUNT = args.max_retry_per_account
-
-    prepared_domain = _prepare_cloudflare_mail_domain(args)
-    if prepared_domain:
-        args.domain = prepared_domain
-        out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
 
     base_url = args.target_url or os.environ.get("TARGET_URL", DEFAULT_TARGET_BASE_URL)
     token = args.target_token or os.environ.get("TARGET_TOKEN", DEFAULT_TARGET_TOKEN)
@@ -2850,6 +2830,7 @@ async def main():
             total_timeout = args.timeout
             maintenance_consecutive_fails = 0
             maintenance_consecutive_400_fails = 0
+            current_cf_base_domain_idx = 0
 
             while True:
                 round_num += 1
@@ -2861,6 +2842,16 @@ async def main():
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     out(f"总运行时长已达 {total_timeout} 秒，正常退出", prefix="[Warn]", ts=True)
                     sys.exit(0)
+                
+                # Handle --cf-base-domains
+                if args.cf_base_domains:
+                    args.cf_base_domain = args.cf_base_domains[current_cf_base_domain_idx]
+                    out(f"使用 Cloudflare 主域名: {args.cf_base_domain}", indent=1)
+                
+                prepared_domain = _prepare_cloudflare_mail_domain(args)
+                if prepared_domain:
+                    args.domain = prepared_domain
+                    out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
 
                 valid_count = await check_and_clean_accounts(client, args.quota_threshold, args.concurrency)
                 need_count = args.min_accounts - valid_count
@@ -2879,7 +2870,6 @@ async def main():
                     remaining,
                     args.domain_index,
                     args.domain,
-                    args.domains,
                     args.concurrency,
                     client,
                     base_url,
@@ -2897,7 +2887,14 @@ async def main():
                 section('本轮申请完成，返回检测流程')
                 out(f"成功: {success_count} 个, 失败: {fail_count} 个")
                 if stopped_by_consecutive_fails:
-                    if maintenance_consecutive_fails >= args.max_consecutive_fails:
+                    if args.cf_base_domains and maintenance_consecutive_fails >= args.max_consecutive_fails:
+                        # Cycle to next CF base domain and continue
+                        current_cf_base_domain_idx = (current_cf_base_domain_idx + 1) % len(args.cf_base_domains)
+                        out(f"连续失败达到阈值，切换到下一个Cloudflare主域名: {args.cf_base_domains[current_cf_base_domain_idx]}", prefix="[CF]")
+                        maintenance_consecutive_fails = 0
+                        maintenance_consecutive_400_fails = 0
+                        continue
+                    elif maintenance_consecutive_fails >= args.max_consecutive_fails:
                         out("连续失败达到阈值，退出维护循环")
                     else:
                         out("检测到致命注册错误，正常退出维护循环")
@@ -2909,21 +2906,23 @@ async def main():
         workers = min(args.workers, total)
         stats = {"ok": 0, "fail": 0}
         lock = threading.Lock()
-        domain_lock = threading.Lock()
-        register_current_domain_idx = [0]  # Use a list to allow modification in nested function
+        register_cf_base_domain_idx = 0
+        # Prepare initial domain for register mode
+        if args.cf_base_domains:
+            args.cf_base_domain = args.cf_base_domains[register_cf_base_domain_idx]
+            out(f"使用 Cloudflare 主域名: {args.cf_base_domain}", indent=1)
+        prepared_domain = _prepare_cloudflare_mail_domain(args)
+        if prepared_domain:
+            args.domain = prepared_domain
+            out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
 
         async def do_one_async(idx, delay=0):
+            nonlocal register_cf_base_domain_idx, prepared_domain
             if delay > 0:
                 await asyncio.sleep(delay)
 
-            # Determine which domain to use
-            with domain_lock:
-                current_register_domain = args.domain
-                if args.domains:
-                    current_register_domain = args.domains[register_current_domain_idx[0]]
-
             start_t = time.time()
-            result = run_one(args.proxy, args.domain_index, current_register_domain)
+            result = run_one(args.proxy, args.domain_index, args.domain)
 
             if result and result.get("token"):
                 save_result(result)
@@ -2941,10 +2940,18 @@ async def main():
             else:
                 with lock:
                     stats["fail"] += 1
-                # Cycle domain on failure for register mode
-                with domain_lock:
-                    if args.domains:
-                        register_current_domain_idx[0] = (register_current_domain_idx[0] + 1) % len(args.domains)
+                # Cycle CF base domain on failure for register mode
+                if args.cf_base_domains:
+                    with lock:
+                        register_cf_base_domain_idx = (register_cf_base_domain_idx + 1) % len(args.cf_base_domains)
+                        args.cf_base_domain = args.cf_base_domains[register_cf_base_domain_idx]
+                        out(f"注册失败，切换到下一个Cloudflare主域名: {args.cf_base_domain}", prefix="[CF]")
+                    # Re-prepare domain with new CF base domain
+                    new_prepared_domain = _prepare_cloudflare_mail_domain(args)
+                    if new_prepared_domain:
+                        with lock:
+                            args.domain = new_prepared_domain
+                            out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
 
             if result and result.get("email"):
                 proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
