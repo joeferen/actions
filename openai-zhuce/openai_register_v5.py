@@ -2561,6 +2561,7 @@ async def register_accounts_maintenance(
     consecutive_fails: int = 0,
     consecutive_400_fails: int = 0,
     max_consecutive_fails: int = 3,
+    args: Any = None,
 ) -> Tuple[int, int, bool, int, int]:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     out(f"开始注册 {need_count} 个账号...", ts=True)
@@ -2572,6 +2573,16 @@ async def register_accounts_maintenance(
     overall_start_time = global_start_time or start_time
     generated_token_files = {}
     stopped_by_consecutive_fails = False
+    current_cf_base_domain_idx = 0
+
+    # Initial CF domain preparation if --cf-base-domains is provided
+    if args and args.cf_base_domains:
+        args.cf_base_domain = args.cf_base_domains[current_cf_base_domain_idx]
+        out(f"使用 Cloudflare 主域名: {args.cf_base_domain}", indent=1)
+        initial_prepared_domain = _prepare_cloudflare_mail_domain(args)
+        if initial_prepared_domain:
+            domain_name = initial_prepared_domain
+            out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {domain_name}", prefix="[CF]", indent=1)
 
     while success_count + fail_count < need_count:
         register_elapsed = int(time.time() - start_time)
@@ -2657,6 +2668,16 @@ async def register_accounts_maintenance(
         else:
             fail_count += 1
             consecutive_fails += 1
+            # Switch CF base domain on every failure if --cf-base-domains is provided
+            if args and args.cf_base_domains:
+                current_cf_base_domain_idx = (current_cf_base_domain_idx + 1) % len(args.cf_base_domains)
+                args.cf_base_domain = args.cf_base_domains[current_cf_base_domain_idx]
+                out(f"注册失败，切换到下一个Cloudflare主域名: {args.cf_base_domain}", prefix="[CF]", indent=1)
+                # Re-prepare the email domain with new CF base domain
+                new_prepared_domain = _prepare_cloudflare_mail_domain(args)
+                if new_prepared_domain:
+                    domain_name = new_prepared_domain
+                    out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {domain_name}", prefix="[CF]", indent=1)
             raw_error_text = str((result or {}).get('error') or '') if isinstance(result, dict) else ''
             error_text = raw_error_text.lower()
             fatal_registration_error = _match_fatal_registration_error(raw_error_text)
@@ -2830,7 +2851,6 @@ async def main():
             total_timeout = args.timeout
             maintenance_consecutive_fails = 0
             maintenance_consecutive_400_fails = 0
-            current_cf_base_domain_idx = 0
 
             while True:
                 round_num += 1
@@ -2842,16 +2862,6 @@ async def main():
                     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     out(f"总运行时长已达 {total_timeout} 秒，正常退出", prefix="[Warn]", ts=True)
                     sys.exit(0)
-                
-                # Handle --cf-base-domains
-                if args.cf_base_domains:
-                    args.cf_base_domain = args.cf_base_domains[current_cf_base_domain_idx]
-                    out(f"使用 Cloudflare 主域名: {args.cf_base_domain}", indent=1)
-                
-                prepared_domain = _prepare_cloudflare_mail_domain(args)
-                if prepared_domain:
-                    args.domain = prepared_domain
-                    out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
 
                 valid_count = await check_and_clean_accounts(client, args.quota_threshold, args.concurrency)
                 need_count = args.min_accounts - valid_count
@@ -2880,6 +2890,7 @@ async def main():
                     maintenance_consecutive_fails,
                     maintenance_consecutive_400_fails,
                     args.max_consecutive_fails,
+                    args,
                 )
 
                 ever_registered = True
@@ -2887,14 +2898,7 @@ async def main():
                 section('本轮申请完成，返回检测流程')
                 out(f"成功: {success_count} 个, 失败: {fail_count} 个")
                 if stopped_by_consecutive_fails:
-                    if args.cf_base_domains and maintenance_consecutive_fails >= args.max_consecutive_fails:
-                        # Cycle to next CF base domain and continue
-                        current_cf_base_domain_idx = (current_cf_base_domain_idx + 1) % len(args.cf_base_domains)
-                        out(f"连续失败达到阈值，切换到下一个Cloudflare主域名: {args.cf_base_domains[current_cf_base_domain_idx]}", prefix="[CF]")
-                        maintenance_consecutive_fails = 0
-                        maintenance_consecutive_400_fails = 0
-                        continue
-                    elif maintenance_consecutive_fails >= args.max_consecutive_fails:
+                    if maintenance_consecutive_fails >= args.max_consecutive_fails:
                         out("连续失败达到阈值，退出维护循环")
                     else:
                         out("检测到致命注册错误，正常退出维护循环")
