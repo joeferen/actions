@@ -1281,6 +1281,8 @@ class RegSession:
 # ===== ChatGPTClient 注册状态机 (codex-console 风格) =====
 class ChatGPTClient:
     SESSION_URL = "https://auth.openai.com/api/auth/session"
+    CSRF_URL = "https://auth.openai.com/api/auth/csrf"
+    SIGNIN_URL = "https://auth.openai.com/api/auth/signin/openai"
     AUTHORIZE_URL = "https://auth.openai.com/api/accounts/authorize/continue"
     REGISTER_URL = "https://auth.openai.com/api/accounts/user/register"
     EMAIL_OTP_SEND_URL = "https://auth.openai.com/api/accounts/email-otp/send"
@@ -1431,9 +1433,68 @@ class ChatGPTClient:
             pass
         return None
 
+    def _get_csrf_token(self) -> Optional[str]:
+        try:
+            resp = self.session.get(self.CSRF_URL, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("csrfToken")
+        except Exception:
+            pass
+        return None
+
+    def _signin(self, email: str, csrf_token: str) -> Optional[str]:
+        params = {
+            "prompt": "login",
+            "ext-oai-did": self.device_id,
+            "auth_session_logging_id": secrets.token_hex(16),
+            "screen_hint": "login_or_signup",
+            "login_hint": email,
+        }
+        form_data = {
+            "callbackUrl": f"{AUTH_URL}/",
+            "csrfToken": csrf_token,
+            "json": "true",
+        }
+        headers = {
+            "Referer": f"{AUTH_URL}/",
+            "Origin": AUTH_URL,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        try:
+            resp = self.session.post(self.SIGNIN_URL, params=params, data=form_data, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("url")
+        except Exception:
+            pass
+        return None
+
+    def _authorize(self, url: str) -> Optional[str]:
+        try:
+            resp = self.session.get(url, allow_redirects=True, timeout=30)
+            return str(resp.url)
+        except Exception:
+            return None
+
     def _continue_oauth(self) -> str:
         self._oauth = generate_oauth_url()
-        self.session.get(self._oauth.auth_url, timeout=30)
+
+        csrf_token = self._get_csrf_token()
+        if not csrf_token:
+            raise RuntimeError("获取 CSRF token 失败")
+
+        auth_url = self._signin(self._email, csrf_token)
+        if not auth_url:
+            raise RuntimeError("Signin 获取 authorize URL 失败")
+
+        final_url = self._authorize(auth_url)
+        if not final_url:
+            raise RuntimeError("Authorize 访问失败")
+
+        if "api/accounts/authorize" in final_url or final_url.endswith("/error"):
+            raise RuntimeError(f"Authorize 被拦截: {final_url[:100]}")
+
         return self.session.cookies.get("oai-did") or ""
 
     def _follow_redirects(self, url: str, max_hops: int = 12) -> Optional[str]:
