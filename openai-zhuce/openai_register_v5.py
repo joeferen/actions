@@ -1296,8 +1296,10 @@ class RegSession:
 
 # ===== ChatGPTClient 注册状态机 (codex-console 风格) =====
 class ChatGPTClient:
+    BASE = "https://chatgpt.com"
+    AUTH = "https://auth.openai.com"
     SESSION_URL = "https://auth.openai.com/api/auth/session"
-    CSRF_URL = "https://auth.openai.com/api/auth/csrf"
+    CSRF_URL = "https://chatgpt.com/api/auth/csrf"
     SIGNIN_URL = "https://auth.openai.com/api/auth/signin/openai"
     AUTHORIZE_URL = "https://auth.openai.com/api/accounts/authorize/continue"
     REGISTER_URL = "https://auth.openai.com/api/accounts/user/register"
@@ -1451,10 +1453,18 @@ class ChatGPTClient:
             pass
         return None
 
+    def _visit_homepage(self) -> bool:
+        try:
+            resp = self.session.get(f"{self.BASE}/", allow_redirects=True, timeout=30)
+            return resp.status_code == 200
+        except Exception as e:
+            log.warning(f"访问首页失败: {e}")
+            return False
+
     def _get_csrf_token(self) -> Optional[str]:
         headers = {
             "Accept": "application/json",
-            "Referer": f"{AUTH_URL}/",
+            "Referer": f"{self.BASE}/",
             "Sec-Fetch-Site": "same-origin",
         }
         try:
@@ -1480,13 +1490,13 @@ class ChatGPTClient:
             "login_hint": email,
         }
         form_data = {
-            "callbackUrl": f"{AUTH_URL}/",
+            "callbackUrl": f"{self.AUTH}/",
             "csrfToken": csrf_token,
             "json": "true",
         }
         headers = {
-            "Referer": f"{AUTH_URL}/",
-            "Origin": AUTH_URL,
+            "Referer": f"{self.AUTH}/",
+            "Origin": self.AUTH,
             "Content-Type": "application/x-www-form-urlencoded",
         }
         try:
@@ -1507,23 +1517,47 @@ class ChatGPTClient:
 
     def _continue_oauth(self) -> str:
         self._oauth = generate_oauth_url()
+        max_attempts = 3
 
-        csrf_token = self._get_csrf_token()
-        if not csrf_token:
-            raise RuntimeError("获取 CSRF token 失败")
+        for attempt in range(max_attempts):
+            if attempt > 0:
+                log.info(f"预授权阶段重试 {attempt + 1}/{max_attempts}...")
+                self._device_id = str(uuid.uuid4())
+                self._session = None
+                self._init_session()
 
-        auth_url = self._signin(self._email, csrf_token)
-        if not auth_url:
-            raise RuntimeError("Signin 获取 authorize URL 失败")
+            if not self._visit_homepage():
+                if attempt < max_attempts - 1:
+                    continue
+                raise RuntimeError("访问首页失败")
 
-        final_url = self._authorize(auth_url)
-        if not final_url:
-            raise RuntimeError("Authorize 访问失败")
+            csrf_token = self._get_csrf_token()
+            if not csrf_token:
+                if attempt < max_attempts - 1:
+                    continue
+                raise RuntimeError("获取 CSRF token 失败")
 
-        if "api/accounts/authorize" in final_url or final_url.endswith("/error"):
-            raise RuntimeError(f"Authorize 被拦截: {final_url[:100]}")
+            auth_url = self._signin(self._email, csrf_token)
+            if not auth_url:
+                if attempt < max_attempts - 1:
+                    continue
+                raise RuntimeError("Signin 获取 authorize URL 失败")
 
-        return self.session.cookies.get("oai-did") or ""
+            final_url = self._authorize(auth_url)
+            if not final_url:
+                if attempt < max_attempts - 1:
+                    continue
+                raise RuntimeError("Authorize 访问失败")
+
+            if "api/accounts/authorize" in final_url or final_url.endswith("/error"):
+                log.warning(f"检测到 Cloudflare/SPA 中间页，准备重试预授权: {final_url[:100]}...")
+                if attempt < max_attempts - 1:
+                    continue
+                raise RuntimeError(f"预授权被拦截: {final_url[:100]}")
+
+            return self.session.cookies.get("oai-did") or ""
+
+        raise RuntimeError("预授权失败")
 
     def _follow_redirects(self, url: str, max_hops: int = 12) -> Optional[str]:
         current = url
