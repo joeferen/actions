@@ -1490,22 +1490,33 @@ class ChatGPTClient:
             "login_hint": email,
         }
         form_data = {
-            "callbackUrl": f"{self.AUTH}/",
+            "callbackUrl": f"{self.BASE}/",
             "csrfToken": csrf_token,
             "json": "true",
         }
         headers = {
-            "Referer": f"{self.AUTH}/",
-            "Origin": self.AUTH,
+            "Referer": f"{self.BASE}/",
+            "Origin": self.BASE,
             "Content-Type": "application/x-www-form-urlencoded",
+            "Sec-Fetch-Site": "same-origin",
         }
         try:
             resp = self.session.post(self.SIGNIN_URL, params=params, data=form_data, headers=headers, timeout=30)
             if resp.status_code == 200:
-                data = resp.json()
-                return data.get("url")
-        except Exception:
-            pass
+                try:
+                    data = resp.json()
+                    url = data.get("url")
+                    if url:
+                        log.info(f"Signin 成功获取 authorize URL")
+                        return url
+                    else:
+                        log.warning(f"Signin 响应无 URL: {resp.text[:200]}")
+                except Exception as e:
+                    log.warning(f"Signin JSON 解析失败: {e}, resp: {resp.text[:200]}")
+            else:
+                log.warning(f"Signin 请求失败: {resp.status_code}, resp: {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"Signin 请求异常: {e}")
         return None
 
     def _authorize(self, url: str) -> Optional[str]:
