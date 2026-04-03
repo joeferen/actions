@@ -2590,12 +2590,21 @@ async def register_accounts_maintenance(
 
     # Initial CF domain preparation if --cf-base-domains is provided
     if args and args.cf_base_domains:
-        args.cf_base_domain = args.cf_base_domains[current_cf_base_domain_idx]
-        out(f"使用 Cloudflare 主域名: {args.cf_base_domain}", indent=1)
-        initial_prepared_domain = _prepare_cloudflare_mail_domain(args)
-        if initial_prepared_domain:
-            domain_name = initial_prepared_domain
-            out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {domain_name}", prefix="[CF]", indent=1)
+        # Try to find a working CF base domain from the list
+        found_working = False
+        for i in range(len(args.cf_base_domains)):
+            current_cf_base_domain_idx = (current_cf_base_domain_idx + i) % len(args.cf_base_domains)
+            args.cf_base_domain = args.cf_base_domains[current_cf_base_domain_idx]
+            out(f"尝试使用 Cloudflare 主域名: {args.cf_base_domain}", indent=1)
+            initial_prepared_domain = _prepare_cloudflare_mail_domain(args)
+            if initial_prepared_domain:
+                domain_name = initial_prepared_domain
+                out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {domain_name}", prefix="[CF]", indent=1)
+                found_working = True
+                break
+        if not found_working:
+            out("所有 Cloudflare 主域名都失败了，无法继续注册", prefix="[CF]", ts=True)
+            return success_count, fail_count, True, consecutive_fails, consecutive_400_fails
 
     while success_count + fail_count < need_count:
         register_elapsed = int(time.time() - start_time)
@@ -2683,14 +2692,23 @@ async def register_accounts_maintenance(
             consecutive_fails += 1
             # Switch CF base domain on every failure if --cf-base-domains is provided
             if args and args.cf_base_domains:
-                current_cf_base_domain_idx = (current_cf_base_domain_idx + 1) % len(args.cf_base_domains)
-                args.cf_base_domain = args.cf_base_domains[current_cf_base_domain_idx]
-                out(f"注册失败，切换到下一个Cloudflare主域名: {args.cf_base_domain}", prefix="[CF]", indent=1)
-                # Re-prepare the email domain with new CF base domain
-                new_prepared_domain = _prepare_cloudflare_mail_domain(args)
-                if new_prepared_domain:
-                    domain_name = new_prepared_domain
-                    out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {domain_name}", prefix="[CF]", indent=1)
+                # Try to find a working CF base domain from the list
+                found_working = False
+                for i in range(1, len(args.cf_base_domains) + 1):
+                    current_cf_base_domain_idx = (current_cf_base_domain_idx + 1) % len(args.cf_base_domains)
+                    args.cf_base_domain = args.cf_base_domains[current_cf_base_domain_idx]
+                    out(f"注册失败，尝试切换到下一个Cloudflare主域名: {args.cf_base_domain}", prefix="[CF]", indent=1)
+                    # Re-prepare the email domain with new CF base domain
+                    new_prepared_domain = _prepare_cloudflare_mail_domain(args)
+                    if new_prepared_domain:
+                        domain_name = new_prepared_domain
+                        out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {domain_name}", prefix="[CF]", indent=1)
+                        found_working = True
+                        break
+                if not found_working:
+                    out("所有 Cloudflare 主域名都失败了，无法继续注册", prefix="[CF]", ts=True)
+                    stopped_by_consecutive_fails = True
+                    break
             raw_error_text = str((result or {}).get('error') or '') if isinstance(result, dict) else ''
             error_text = raw_error_text.lower()
             fatal_registration_error = _match_fatal_registration_error(raw_error_text)
@@ -2926,15 +2944,24 @@ async def main():
         register_cf_base_domain_idx = 0
         # Prepare initial domain for register mode
         if args.cf_base_domains:
-            args.cf_base_domain = args.cf_base_domains[register_cf_base_domain_idx]
-            out(f"使用 Cloudflare 主域名: {args.cf_base_domain}", indent=1)
-        prepared_domain = _prepare_cloudflare_mail_domain(args)
-        if prepared_domain:
-            args.domain = prepared_domain
-            out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
+            # Try to find a working CF base domain from the list
+            found_working = False
+            for i in range(len(args.cf_base_domains)):
+                register_cf_base_domain_idx = (register_cf_base_domain_idx + i) % len(args.cf_base_domains)
+                args.cf_base_domain = args.cf_base_domains[register_cf_base_domain_idx]
+                out(f"尝试使用 Cloudflare 主域名: {args.cf_base_domain}", indent=1)
+                prepared_domain = _prepare_cloudflare_mail_domain(args)
+                if prepared_domain:
+                    args.domain = prepared_domain
+                    out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
+                    found_working = True
+                    break
+            if not found_working:
+                out("所有 Cloudflare 主域名都失败了，无法继续注册", prefix="[CF]", ts=True)
+                sys.exit(1)
 
         async def do_one_async(idx, delay=0):
-            nonlocal register_cf_base_domain_idx, prepared_domain
+            nonlocal register_cf_base_domain_idx
             if delay > 0:
                 await asyncio.sleep(delay)
 
@@ -2959,16 +2986,24 @@ async def main():
                     stats["fail"] += 1
                 # Cycle CF base domain on failure for register mode
                 if args.cf_base_domains:
-                    with lock:
-                        register_cf_base_domain_idx = (register_cf_base_domain_idx + 1) % len(args.cf_base_domains)
-                        args.cf_base_domain = args.cf_base_domains[register_cf_base_domain_idx]
-                        out(f"注册失败，切换到下一个Cloudflare主域名: {args.cf_base_domain}", prefix="[CF]")
-                    # Re-prepare domain with new CF base domain
-                    new_prepared_domain = _prepare_cloudflare_mail_domain(args)
-                    if new_prepared_domain:
+                    # Try to find a working CF base domain from the list
+                    found_working = False
+                    for i in range(1, len(args.cf_base_domains) + 1):
                         with lock:
-                            args.domain = new_prepared_domain
-                            out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
+                            register_cf_base_domain_idx = (register_cf_base_domain_idx + 1) % len(args.cf_base_domains)
+                            args.cf_base_domain = args.cf_base_domains[register_cf_base_domain_idx]
+                        out(f"注册失败，尝试切换到下一个Cloudflare主域名: {args.cf_base_domain}", prefix="[CF]")
+                        # Re-prepare domain with new CF base domain
+                        new_prepared_domain = _prepare_cloudflare_mail_domain(args)
+                        if new_prepared_domain:
+                            with lock:
+                                args.domain = new_prepared_domain
+                                out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
+                            found_working = True
+                            break
+                    if not found_working:
+                        out("所有 Cloudflare 主域名都失败了，无法继续注册", prefix="[CF]", ts=True)
+                        sys.exit(1)
 
             if result and result.get("email"):
                 proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
