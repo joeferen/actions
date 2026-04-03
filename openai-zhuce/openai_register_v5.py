@@ -1207,7 +1207,10 @@ def get_sentinel_header(device_id: str, user_agent: str, flow: str = "authorize_
     if resp.status_code < 200 or resp.status_code >= 300:
         raise RuntimeError(f"Sentinel 失败: {resp.status_code} {resp.text[:200]}")
 
-    token = resp.json()["token"]
+    try:
+        token = resp.json()["token"]
+    except Exception as e:
+        raise RuntimeError(f"Sentinel 解析失败: {resp.text[:200]}, error: {e}")
     header = json.dumps({
         "p": "", "t": "", "c": token,
         "id": device_id, "flow": flow,
@@ -1352,7 +1355,10 @@ class ChatGPTClient:
         )
         if resp.status_code < 200 or resp.status_code >= 300:
             raise RuntimeError(f"Sentinel 失败: {resp.status_code}")
-        token = resp.json()["token"]
+        try:
+            token = resp.json()["token"]
+        except Exception as e:
+            raise RuntimeError(f"Sentinel 解析失败: {resp.text[:200]}, error: {e}")
         return {
             "openai-sentinel-token": json.dumps({
                 "p": "", "t": "", "c": token,
@@ -1369,8 +1375,11 @@ class ChatGPTClient:
         }
         resp = self.session.post(self.AUTHORIZE_URL, json=data, headers=headers, timeout=30)
         if resp.status_code < 200 or resp.status_code >= 300:
-            raise RuntimeError(f"authorize 失败: {resp.status_code}")
-        return resp.json()
+            raise RuntimeError(f"authorize 失败: {resp.status_code}, resp: {resp.text[:200]}")
+        try:
+            return resp.json()
+        except Exception as e:
+            raise RuntimeError(f"authorize 解析失败: {resp.text[:200]}, error: {e}")
 
     def _send_otp(self) -> None:
         headers = {"Referer": "https://auth.openai.com/create-account/password"}
@@ -1610,7 +1619,10 @@ class OAuthClient:
         )
         if resp.status_code < 200 or resp.status_code >= 300:
             raise RuntimeError(f"Sentinel 失败: {resp.status_code}")
-        token = resp.json()["token"]
+        try:
+            token = resp.json()["token"]
+        except Exception as e:
+            raise RuntimeError(f"Sentinel 解析失败: {resp.text[:200]}, error: {e}")
         return {
             "openai-sentinel-token": json.dumps({
                 "p": "", "t": "", "c": token,
@@ -1689,7 +1701,7 @@ class OAuthClient:
             timeout=30,
         )
         if resp.status_code < 200 or resp.status_code >= 300:
-            raise RuntimeError(f"提交邮箱失败: {resp.status_code}")
+            raise RuntimeError(f"提交邮箱失败: {resp.status_code}, resp: {resp.text[:200]}")
 
         pwd_sentinel = self._sentinel_headers("password_verify")
         headers = {
