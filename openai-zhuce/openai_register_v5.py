@@ -853,15 +853,18 @@ def get_email_detail(email_id: int, proxies: Any = None) -> Dict[str, Any]:
 
 
 def delete_mailbox(address: str, proxies: Any = None) -> bool:
-    resp = requests.delete(
-        f"{MAILFREE_BASE}/api/mailboxes",
-        headers=_mailfree_headers(),
-        params={"address": address},
-        proxies=proxies,
-        impersonate="chrome",
-        timeout=15,
-    )
-    return resp.status_code == 200
+    try:
+        resp = requests.delete(
+            f"{MAILFREE_BASE}/api/mailboxes",
+            headers=_mailfree_headers(),
+            params={"address": address},
+            proxies=proxies,
+            impersonate="chrome",
+            timeout=15,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 
 def reset_mailbox_password(address: str, new_password: str, proxies: Any = None) -> bool:
