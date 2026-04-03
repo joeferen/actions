@@ -1434,13 +1434,23 @@ class ChatGPTClient:
         return None
 
     def _get_csrf_token(self) -> Optional[str]:
+        headers = {
+            "Accept": "application/json",
+            "Referer": f"{AUTH_URL}/",
+            "Sec-Fetch-Site": "same-origin",
+        }
         try:
-            resp = self.session.get(self.CSRF_URL, timeout=30)
+            resp = self.session.get(self.CSRF_URL, headers=headers, timeout=30)
             if resp.status_code == 200:
-                data = resp.json()
-                return data.get("csrfToken")
-        except Exception:
-            pass
+                try:
+                    data = resp.json()
+                    return data.get("csrfToken")
+                except Exception as e:
+                    log.warning(f"CSRF JSON 解析失败: {e}, resp: {resp.text[:200]}")
+            else:
+                log.warning(f"CSRF 请求失败: {resp.status_code}, resp: {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"CSRF 请求异常: {e}")
         return None
 
     def _signin(self, email: str, csrf_token: str) -> Optional[str]:
