@@ -1416,7 +1416,7 @@ def register_account(
             raise RuntimeError(f"提交邮箱环节异常: {signup_resp.status_code}")
 
         log.info(f"    📝 [Step 6] 正在计算 Sentinel PoW (username_password_create)...")
-        sentinel_reg = get_sentinel_header(did, "", "username_password_create", proxies, use=True)
+        sentinel_reg = get_sentinel_header(did, "", "username_password_create", proxies)
         log.info(f"    📝 [Step 6] Sentinel Token (username_password_create) 获取成功")
 
         pwd_headers = _oai_headers(did, {
@@ -1529,7 +1529,7 @@ def register_account(
         log.info(f"    📝 [Step 9] 姓名: {user_info['name']}, 生日: {user_info['birthdate']}")
 
         log.info(f"    📝 [Step 9] 正在计算 Sentinel PoW (create_account)...")
-        sentinel_create = get_sentinel_header(did, "", "create_account", proxies, use=True)
+        sentinel_create = get_sentinel_header(did, "", "create_account", proxies)
         log.info(f"    📝 [Step 9] Sentinel Token (create_account) 获取成功")
 
         create_headers = _oai_headers(did, {
