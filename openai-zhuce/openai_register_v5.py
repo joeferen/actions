@@ -1454,14 +1454,21 @@ class ChatGPTClient:
         return None
 
     def _visit_homepage(self) -> bool:
+        log.info("访问 ChatGPT 首页...")
         try:
             resp = self.session.get(f"{self.BASE}/", allow_redirects=True, timeout=30)
-            return resp.status_code == 200
+            if resp.status_code == 200:
+                log.info(f"首页访问成功")
+                return True
+            else:
+                log.warning(f"访问首页失败: {resp.status_code}")
+                return False
         except Exception as e:
             log.warning(f"访问首页失败: {e}")
             return False
 
     def _get_csrf_token(self) -> Optional[str]:
+        log.info("获取 CSRF token...")
         headers = {
             "Accept": "application/json",
             "Referer": f"{self.BASE}/",
@@ -1472,7 +1479,12 @@ class ChatGPTClient:
             if resp.status_code == 200:
                 try:
                     data = resp.json()
-                    return data.get("csrfToken")
+                    token = data.get("csrfToken")
+                    if token:
+                        log.info(f"CSRF token: {token[:20]}...")
+                        return token
+                    else:
+                        log.warning(f"CSRF token 为空")
                 except Exception as e:
                     log.warning(f"CSRF JSON 解析失败: {e}, resp: {resp.text[:200]}")
             else:
@@ -1482,6 +1494,7 @@ class ChatGPTClient:
         return None
 
     def _signin(self, email: str, csrf_token: str) -> Optional[str]:
+        log.info(f"提交邮箱: {email}")
         params = {
             "prompt": "login",
             "ext-oai-did": self.device_id,
@@ -1507,7 +1520,7 @@ class ChatGPTClient:
                     data = resp.json()
                     url = data.get("url")
                     if url:
-                        log.info(f"Signin 成功获取 authorize URL")
+                        log.info(f"获取到 authorize URL")
                         return url
                     else:
                         log.warning(f"Signin 响应无 URL: {resp.text[:200]}")
@@ -1520,10 +1533,14 @@ class ChatGPTClient:
         return None
 
     def _authorize(self, url: str) -> Optional[str]:
+        log.info("访问 authorize URL...")
         try:
             resp = self.session.get(url, allow_redirects=True, timeout=30)
-            return str(resp.url)
-        except Exception:
+            final_url = str(resp.url)
+            log.info(f"重定向到: {final_url}")
+            return final_url
+        except Exception as e:
+            log.warning(f"Authorize 失败: {e}")
             return None
 
     def _continue_oauth(self) -> str:
@@ -1560,11 +1577,14 @@ class ChatGPTClient:
                     continue
                 raise RuntimeError("Authorize 访问失败")
 
-            if "api/accounts/authorize" in final_url or final_url.endswith("/error"):
-                log.warning(f"检测到 Cloudflare/SPA 中间页，准备重试预授权: {final_url[:100]}...")
+            final_path = urlparse(final_url).path
+            log.info(f"Authorize → {final_path}")
+
+            if "api/accounts/authorize" in final_path or final_path == "/error":
+                log.warning(f"检测到 Cloudflare/SPA 中间页，准备重试预授权: {final_url[:160]}...")
                 if attempt < max_attempts - 1:
                     continue
-                raise RuntimeError(f"预授权被拦截: {final_url[:100]}")
+                raise RuntimeError(f"预授权被拦截: {final_path}")
 
             return self.session.cookies.get("oai-did") or ""
 
@@ -1627,25 +1647,32 @@ class ChatGPTClient:
 
         page_data = self._continue_authorize({})
         page_type = page_data.get("page", {}).get("type", "")
+        log.info(f"注册状态起点: {page_type}")
         is_existing = page_type == "email_otp_verification"
 
         human_sleep("network")
 
         if not is_existing:
+            log.info("全新注册流程")
             reg_data = self._continue_authorize({"password": password}, "signup")
             reg_type = reg_data.get("page", {}).get("type", "")
+            log.info(f"注册类型: {reg_type}")
             human_sleep("click")
 
             if reg_type == "add_phone":
+                log.warning("检测到 add_phone 阶段，交由登录补全流程处理")
                 self._continue_authorize({}, "login")
                 return self._oauth_login_flow(password, otp_poll_fn)
 
+            log.info("触发发送验证码...")
             self._send_otp()
         else:
+            log.info("已有账号流程")
             self._continue_authorize({}, "login")
 
-        otp_sent_at = time.time()
+        log.info("等待邮箱验证码...")
         code = otp_poll_fn()
+        log.info(f"验证 OTP 码: {code}")
 
         self._validate_otp(code)
         human_sleep("network")
@@ -1653,28 +1680,39 @@ class ChatGPTClient:
         if not is_existing:
             name = name or random_name()
             birthday = birthday or random_birthday()
+            log.info(f"完成账号创建: {name}")
             create_data = self._create_account(name, birthday)
             create_type = create_data.get("page", {}).get("type", "")
+            log.info(f"账号创建状态: {create_type}")
             if create_type == "add_phone":
+                log.warning("检测到 add_phone 阶段，交由登录补全流程处理")
                 return self._oauth_login_flow(password, otp_poll_fn)
 
+        log.info("✅ 注册流程完成")
         return self._complete_token_exchange()
 
     def _oauth_login_flow(self, password: str, otp_poll_fn: Callable[[], str]) -> str:
+        log.info("登录补 token 流程...")
         login_data = self._continue_authorize({}, "login")
         login_type = login_data.get("page", {}).get("type", "")
+        log.info(f"登录类型: {login_type}")
         if login_type != "login_password":
             raise RuntimeError(f"未进入密码页面: {login_type}")
 
         pwd_data = self._verify_password(password)
         pwd_type = pwd_data.get("page", {}).get("type", "")
+        log.info(f"密码验证类型: {pwd_type}")
         if pwd_type != "email_otp_verification":
             raise RuntimeError(f"未进入验证码页面: {pwd_type}")
 
+        log.info("等待邮箱验证码...")
         code = otp_poll_fn()
+        log.info(f"验证 OTP 码: {code}")
+
         self._validate_otp(code)
         human_sleep("network")
 
+        log.info("✅ 登录补 token 完成")
         return self._complete_token_exchange()
 
     def reuse_session_and_get_tokens(self) -> Optional[str]:
