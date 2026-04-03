@@ -2539,16 +2539,18 @@ async def register_accounts_maintenance(
     register_timeout: float,
     domain_index: int,
     domain_name: str,
-    concurrency: int,
-    client: HttpClient,
-    base_url: str,
-    token: str,
+    domains: List[str] = None,
+    concurrency: int = None,
+    client: HttpClient = None,
+    base_url: str = None,
+    token: str = None,
     register_interval: int = 60,
     proxy: Optional[str] = None,
     global_start_time: Optional[float] = None,
     consecutive_fails: int = 0,
     consecutive_400_fails: int = 0,
     max_consecutive_fails: int = 3,
+    current_domain_index: int = 0,
 ) -> Tuple[int, int, bool, int, int]:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     out(f"开始注册 {need_count} 个账号...", ts=True)
@@ -2557,6 +2559,9 @@ async def register_accounts_maintenance(
     success_count = 0
     fail_count = 0
     start_time = time.time()
+    current_domain_idx = current_domain_index
+    if not domains:
+        domains = []
     overall_start_time = global_start_time or start_time
     generated_token_files = {}
     stopped_by_consecutive_fails = False
@@ -2578,12 +2583,18 @@ async def register_accounts_maintenance(
             stopped_by_consecutive_fails = True
             break
 
+        # Determine which domain to use
+        current_use_domain = domain_name
+        if domains:
+            current_use_domain = domains[current_domain_idx]
+            out(f"使用域名: {current_use_domain}", indent=1)
+
         total_count = success_count + fail_count + 1
         out(f"\n--- 注册第 {total_count}/{need_count} 次 (成功: {success_count}, 失败: {fail_count}, 已运行: {total_elapsed}s, 剩余: {remaining_time}s) ---")
 
         before_snap = snapshot_token_files()
 
-        result = run_one(proxy, domain_index, domain_name)
+        result = run_one(proxy, domain_index, current_use_domain)
 
         after_snap = snapshot_token_files()
         new_token_files = diff_token_files(before_snap, after_snap)
@@ -2645,6 +2656,10 @@ async def register_accounts_maintenance(
         else:
             fail_count += 1
             consecutive_fails += 1
+            # Cycle to next domain if we have multiple domains
+            if domains:
+                current_domain_idx = (current_domain_idx + 1) % len(domains)
+                out(f"注册失败，切换到下一个域名: {domains[current_domain_idx]}", indent=1)
             raw_error_text = str((result or {}).get('error') or '') if isinstance(result, dict) else ''
             error_text = raw_error_text.lower()
             fatal_registration_error = _match_fatal_registration_error(raw_error_text)
@@ -2785,6 +2800,7 @@ async def main():
     parser.add_argument("--mode", choices=["register", "maintenance", "both"], default="both", help="运行模式")
     parser.add_argument("--max-retry-per-account", type=int, default=3, help="每个账号最大重试次数（默认3）")
     parser.add_argument("--max-consecutive-fails", type=int, default=3, help="维护模式最大连续失败次数（默认3）")
+    parser.add_argument("--domains", nargs="*", default=[], help="指定多个邮箱域名，注册失败时会自动切换")
 
     args = parser.parse_args()
 
@@ -2851,6 +2867,7 @@ async def main():
                     remaining,
                     args.domain_index,
                     args.domain,
+                    args.domains,
                     args.concurrency,
                     client,
                     base_url,
@@ -2880,13 +2897,21 @@ async def main():
         workers = min(args.workers, total)
         stats = {"ok": 0, "fail": 0}
         lock = threading.Lock()
+        domain_lock = threading.Lock()
+        register_current_domain_idx = [0]  # Use a list to allow modification in nested function
 
         async def do_one_async(idx, delay=0):
             if delay > 0:
                 await asyncio.sleep(delay)
 
+            # Determine which domain to use
+            with domain_lock:
+                current_register_domain = args.domain
+                if args.domains:
+                    current_register_domain = args.domains[register_current_domain_idx[0]]
+
             start_t = time.time()
-            result = run_one(args.proxy, args.domain_index, args.domain)
+            result = run_one(args.proxy, args.domain_index, current_register_domain)
 
             if result and result.get("token"):
                 save_result(result)
@@ -2904,6 +2929,10 @@ async def main():
             else:
                 with lock:
                     stats["fail"] += 1
+                # Cycle domain on failure for register mode
+                with domain_lock:
+                    if args.domains:
+                        register_current_domain_idx[0] = (register_current_domain_idx[0] + 1) % len(args.domains)
 
             if result and result.get("email"):
                 proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
