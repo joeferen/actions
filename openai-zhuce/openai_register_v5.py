@@ -126,6 +126,7 @@ import logging
 import subprocess
 import ssl
 import socket
+import uuid
 from datetime import datetime
 from urllib.parse import urlencode, urlparse, parse_qs, urljoin
 from dataclasses import dataclass
@@ -327,6 +328,21 @@ def _generate_accept_language() -> str:
             return f"{parts[0]},*;q=0.5"
         return parts[0]
     return ",".join(parts)
+
+
+def seed_oai_device_cookie(session, device_id: str) -> None:
+    for domain in (
+        "chatgpt.com",
+        ".chatgpt.com",
+        "openai.com",
+        ".openai.com",
+        "auth.openai.com",
+        ".auth.openai.com",
+    ):
+        try:
+            session.cookies.set("oai-did", device_id, domain=domain)
+        except Exception:
+            continue
 
 
 def _match_fatal_registration_error(error_text: str) -> Optional[str]:
@@ -1295,14 +1311,15 @@ class ChatGPTClient:
     def __init__(self, proxies: Any = None, profile: Optional[str] = None, lang: Optional[str] = None):
         self.proxies = proxies
         self.profile = profile or pick_browser_profile()[0]
-        self.lang = lang or pick_browser_profile()[1]
+        self.lang = lang or random.choice(["en-US,en;q=0.9", "en-US,en;q=0.9,zh-CN;q=0.8", "en,en-US;q=0.9", "en-US,en;q=0.8"])
+        self._device_id = str(uuid.uuid4())
         self._session = None
-        self._device_id: Optional[str] = None
         self._oauth: Optional[OAuthStart] = None
         self._last_response_data: Dict[str, Any] = {}
         self._token_json: Optional[str] = None
         self._email: Optional[str] = None
         self._password: Optional[str] = None
+        self._init_session()
 
     def _build_session(self) -> requests.Session:
         session = requests.Session(
@@ -1325,6 +1342,7 @@ class ChatGPTClient:
     def _init_session(self) -> None:
         if self._session is None:
             self._session = self._build_session()
+            seed_oai_device_cookie(self._session, self._device_id)
 
     @property
     def session(self) -> requests.Session:
