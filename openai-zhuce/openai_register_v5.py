@@ -510,7 +510,7 @@ def _cf_list_dns_records(zone_id: str, api_token: str, per_page: int = 1000) -> 
     return all_records
 
 
-def _cf_print_subdomains(zone_id: str, base_domain: str, api_token: str) -> List[str]:
+def _cf_print_subdomains(zone_id: str, base_domain: str, api_token: str, quiet: bool = False) -> List[str]:
     records = _cf_list_dns_records(zone_id, api_token)
     suffix = f".{base_domain.strip('.').lower()}"
     names = sorted({
@@ -519,12 +519,13 @@ def _cf_print_subdomains(zone_id: str, base_domain: str, api_token: str) -> List
         if str(record.get("name") or "").lower().endswith(suffix)
         and str(record.get("name") or "").lower() != base_domain.strip('.').lower()
     })
-    out("当前子域列表:", prefix="[CF]")
-    if names:
-        for item in names:
-            out(f"- {item}", indent=1)
-    else:
-        out("- (空)", indent=1)
+    if not quiet:
+        out("当前子域列表:", prefix="[CF]")
+        if names:
+            for item in names:
+                out(f"- {item}", indent=1)
+        else:
+            out("- (空)", indent=1)
     return names
 
 
@@ -2574,6 +2575,8 @@ async def register_accounts_maintenance(
     current_cf_base_domain_idx = 0
 
     # Initial CF domain preparation if --cf-base-domains is provided
+    previous_cf_base_domain = None
+    previous_email_domain = None
     if args and args.cf_base_domains:
         # Try to find a working CF base domain from the list
         found_working = False
@@ -2585,6 +2588,8 @@ async def register_accounts_maintenance(
             if initial_prepared_domain:
                 domain_name = initial_prepared_domain
                 out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {domain_name}", prefix="[CF]", indent=1)
+                previous_cf_base_domain = args.cf_base_domain
+                previous_email_domain = domain_name
                 found_working = True
                 break
         if not found_working:
@@ -2677,6 +2682,26 @@ async def register_accounts_maintenance(
             consecutive_fails += 1
             # Switch CF base domain on every failure if --cf-base-domains is provided
             if args and args.cf_base_domains:
+                # First, delete previous email domain in its own zone if we have previous info
+                if previous_cf_base_domain and previous_email_domain:
+                    out(f"正在删除旧邮箱域名的 DNS 记录: {previous_email_domain} (在 {previous_cf_base_domain} 区域)", prefix="[CF]", indent=1)
+                    try:
+                        # Temporarily set args.cf_base_domain back to previous to find zone and delete
+                        original_cf_base_domain = args.cf_base_domain
+                        args.cf_base_domain = previous_cf_base_domain
+                        zone = _cf_find_zone(previous_cf_base_domain, str(args.cf_api_token or "").strip())
+                        zone_id = str(zone.get("id") or "").strip()
+                        if zone_id:
+                            # Get subdomains for this zone quietly
+                            subdomains_prev = _cf_print_subdomains(zone_id, previous_cf_base_domain, str(args.cf_api_token or "").strip(), quiet=True)
+                            if previous_email_domain.lower() in set(subdomains_prev):
+                                deleted_count = _cf_delete_domain_dns(zone_id, previous_email_domain, str(args.cf_api_token or "").strip())
+                                out(f"已删除旧邮箱域名 DNS: {previous_email_domain} ({deleted_count} 条)", prefix="[CF]", indent=1)
+                        # Restore args.cf_base_domain
+                        args.cf_base_domain = original_cf_base_domain
+                    except Exception as delete_err:
+                        out(f"删除旧邮箱域名 DNS 记录失败: {delete_err}", prefix="[Warn] [CF]", indent=1)
+                
                 # Try to find a working CF base domain from the list
                 found_working = False
                 for i in range(1, len(args.cf_base_domains) + 1):
@@ -2686,6 +2711,9 @@ async def register_accounts_maintenance(
                     # Re-prepare the email domain with new CF base domain
                     new_prepared_domain = _prepare_cloudflare_mail_domain(args)
                     if new_prepared_domain:
+                        # Save previous before updating
+                        previous_cf_base_domain = args.cf_base_domain
+                        previous_email_domain = new_prepared_domain
                         domain_name = new_prepared_domain
                         out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {domain_name}", prefix="[CF]", indent=1)
                         found_working = True
@@ -2927,6 +2955,8 @@ async def main():
         stats = {"ok": 0, "fail": 0}
         lock = threading.Lock()
         register_cf_base_domain_idx = 0
+        previous_register_cf_base_domain = None
+        previous_register_email_domain = None
         # Prepare initial domain for register mode
         if args.cf_base_domains:
             # Try to find a working CF base domain from the list
@@ -2939,6 +2969,8 @@ async def main():
                 if prepared_domain:
                     args.domain = prepared_domain
                     out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
+                    previous_register_cf_base_domain = args.cf_base_domain
+                    previous_register_email_domain = args.domain
                     found_working = True
                     break
             if not found_working:
@@ -2946,7 +2978,7 @@ async def main():
                 sys.exit(1)
 
         async def do_one_async(idx, delay=0):
-            nonlocal register_cf_base_domain_idx
+            nonlocal register_cf_base_domain_idx, previous_register_cf_base_domain, previous_register_email_domain
             if delay > 0:
                 await asyncio.sleep(delay)
 
@@ -2971,6 +3003,26 @@ async def main():
                     stats["fail"] += 1
                 # Cycle CF base domain on failure for register mode
                 if args.cf_base_domains:
+                    # First, delete previous email domain in its own zone if we have previous info
+                    if previous_register_cf_base_domain and previous_register_email_domain:
+                        out(f"正在删除旧邮箱域名的 DNS 记录: {previous_register_email_domain} (在 {previous_register_cf_base_domain} 区域)", prefix="[CF]")
+                        try:
+                            # Temporarily set args.cf_base_domain back to previous to find zone and delete
+                            original_cf_base_domain = args.cf_base_domain
+                            args.cf_base_domain = previous_register_cf_base_domain
+                            zone = _cf_find_zone(previous_register_cf_base_domain, str(args.cf_api_token or "").strip())
+                            zone_id = str(zone.get("id") or "").strip()
+                            if zone_id:
+                                # Get subdomains for this zone quietly
+                                subdomains_prev = _cf_print_subdomains(zone_id, previous_register_cf_base_domain, str(args.cf_api_token or "").strip(), quiet=True)
+                                if previous_register_email_domain.lower() in set(subdomains_prev):
+                                    deleted_count = _cf_delete_domain_dns(zone_id, previous_register_email_domain, str(args.cf_api_token or "").strip())
+                                    out(f"已删除旧邮箱域名 DNS: {previous_register_email_domain} ({deleted_count} 条)", prefix="[CF]")
+                            # Restore args.cf_base_domain
+                            args.cf_base_domain = original_cf_base_domain
+                        except Exception as delete_err:
+                            out(f"删除旧邮箱域名 DNS 记录失败: {delete_err}", prefix="[Warn] [CF]")
+                    
                     # Try to find a working CF base domain from the list
                     found_working = False
                     for i in range(1, len(args.cf_base_domains) + 1):
@@ -2983,6 +3035,9 @@ async def main():
                         if new_prepared_domain:
                             with lock:
                                 args.domain = new_prepared_domain
+                                # Save previous before updating
+                                previous_register_cf_base_domain = args.cf_base_domain
+                                previous_register_email_domain = new_prepared_domain
                                 out(f"Cloudflare 邮箱域名配置完成，本次运行使用新域名: {args.domain}", prefix="[CF]")
                             found_working = True
                             break
