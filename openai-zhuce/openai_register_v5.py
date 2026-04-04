@@ -712,6 +712,84 @@ def _cf_update_worker_mail_domain(account_id: str, worker_name: str, new_value: 
     _cf_wait_for_worker_binding(account_id, worker_name, "MAIL_DOMAIN", new_value, api_token, timeout=verify_timeout, interval=verify_interval)
 
 
+def _cleanup_legacy_mail_domain(args: Any) -> None:
+    """
+    清理上一次运行遗留的旧邮箱域名，从 Worker 的 MAIL_DOMAIN 首个域名删除
+    """
+    cf_token = str(args.cf_api_token or "").strip()
+    if not cf_token or not args.cf_worker_name:
+        return
+    
+    try:
+        # Find account ID (using first domain if multiple)
+        check_domain = None
+        if hasattr(args, 'cf_base_domains') and args.cf_base_domains:
+            check_domain = args.cf_base_domains[0]
+        else:
+            check_domain = args.cf_base_domain
+        if not check_domain:
+            return
+        
+        zone = _cf_find_zone(check_domain, cf_token)
+        zone_id = str(zone.get("id") or "").strip()
+        account_id = str((zone.get("account") or {}).get("id") or "").strip()
+        if not zone_id or not account_id:
+            return
+        
+        # Get current MAIL_DOMAIN from worker
+        settings = _cf_get_worker_settings(account_id, args.cf_worker_name, cf_token)
+        mail_domain_binding = next((b for b in (settings.get("bindings") or []) if b.get("name") == "MAIL_DOMAIN"), None)
+        if not mail_domain_binding:
+            return
+        current_mail_domain = str(mail_domain_binding.get("text") or "").strip()
+        if not current_mail_domain:
+            return
+        domains = _parse_mail_domain_list(current_mail_domain)
+        if not domains:
+            return
+        legacy_domain = domains[0]
+        out(f"检测到遗留邮箱域名: {legacy_domain}", prefix="[CF]")
+        
+        # Try to find which CF base domain this legacy domain belongs to
+        legacy_base_domain = None
+        # Only check against --cf-base-domains (if provided) or --cf-base-domain if not
+        allowed_base_domains = []
+        if hasattr(args, 'cf_base_domains') and args.cf_base_domains:
+            allowed_base_domains.extend(args.cf_base_domains)
+        elif args.cf_base_domain:
+            allowed_base_domains.append(args.cf_base_domain)
+        
+        if not allowed_base_domains:
+            out("没有指定 Cloudflare 主域名，跳过清理遗留域名", prefix="[Warn] [CF]")
+            return
+        
+        for base_domain in allowed_base_domains:
+            base_suffix = f".{base_domain.strip('.').lower()}"
+            if legacy_domain.lower().endswith(base_suffix):
+                legacy_base_domain = base_domain
+                break
+        
+        if not legacy_base_domain:
+            out(f"遗留域名 {legacy_domain} 不在指定的 Cloudflare 主域名列表中，跳过清理", prefix="[Warn] [CF]")
+            return
+        
+        # Get zone ID for legacy base domain and delete DNS records
+        legacy_zone = _cf_find_zone(legacy_base_domain, cf_token)
+        legacy_zone_id = str(legacy_zone.get("id") or "").strip()
+        if not legacy_zone_id:
+            out(f"无法获取遗留域名的 Zone ID，跳过清理", prefix="[Warn] [CF]")
+            return
+        
+        # Delete legacy domain's DNS records
+        legacy_subdomains = _cf_print_subdomains(legacy_zone_id, legacy_base_domain, cf_token, quiet=True)
+        if legacy_domain.lower() in set(legacy_subdomains):
+            deleted_count = _cf_delete_domain_dns(legacy_zone_id, legacy_domain, cf_token)
+            out(f"已删除遗留域名 DNS 记录: {legacy_domain} ({deleted_count} 条)", prefix="[CF]")
+        
+    except Exception as e:
+        out(f"清理遗留域名失败: {e}", prefix="[Warn] [CF]")
+
+
 def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
     cf_token = str(args.cf_api_token or "").strip()
 
@@ -2880,6 +2958,9 @@ async def main():
     MAILFREE_BASE = args.mail_url
     JWT_TOKEN = args.mail_token
     MAX_RETRY_PER_ACCOUNT = args.max_retry_per_account
+
+    # Cleanup legacy domain from last run
+    _cleanup_legacy_mail_domain(args)
 
     base_url = args.target_url or os.environ.get("TARGET_URL", DEFAULT_TARGET_BASE_URL)
     token = args.target_token or os.environ.get("TARGET_TOKEN", DEFAULT_TARGET_TOKEN)
