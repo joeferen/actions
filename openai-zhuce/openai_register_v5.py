@@ -613,7 +613,14 @@ def _cf_delete_domain_dns(zone_id: str, full_domain: str, api_token: str) -> int
             f"/zones/{zone_id}/dns_records/{record['id']}",
             api_token,
         )
-    return len(matched)
+    deleted_count = len(matched)
+    if deleted_count > 0:
+        # Verify deletion
+        remaining_records = _cf_list_dns_records(zone_id, api_token)
+        remaining_matched = [record for record in remaining_records if str(record.get("name") or "").lower() == target]
+        if len(remaining_matched) > 0:
+            raise RuntimeError(f"删除 DNS 记录失败，仍有 {len(remaining_matched)} 条记录未删除: {full_domain}")
+    return deleted_count
 
 
 def _cf_create_dns_record(zone_id: str, record: Dict[str, Any], api_token: str) -> None:
