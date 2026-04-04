@@ -1348,17 +1348,64 @@ class RegSession:
         self.close()
 
 
-def _oai_headers(did: str, extra: dict = None) -> dict:
+def _parse_chrome_version(profile: str) -> tuple:
+    """解析 Chrome 浏览器 profile 为版本信息"""
+    match = re.search(r'chrome(\d+)(?:[a-z]*)', profile, re.IGNORECASE)
+    if not match:
+        return (136, 0, 0, 0)
+    major = int(match.group(1))
+    minor = 0
+    build = random.randint(6000, 7000)
+    patch = random.randint(0, 200)
+    return (major, minor, build, patch)
+
+
+def _oai_headers(
+    did: str, 
+    extra: dict = None, 
+    browser_profile: str = "chrome136",
+    accept_language: str = "en-US,en;q=0.9"
+) -> dict:
+    """生成与 any-auto-register 一致的浏览器请求头"""
+    chrome_major, chrome_minor, chrome_build, chrome_patch = _parse_chrome_version(browser_profile)
+    
+    full_version = f"{chrome_major}.{chrome_minor}.{chrome_build}.{chrome_patch}"
+    
+    # 构建 sec-ch-ua 头
+    sec_ch_ua_parts = [
+        f'"Google Chrome";v="{chrome_major}"',
+        f'"Chromium";v="{chrome_major}"',
+        f'"Not-A.Brand";v="99"',
+    ]
+    sec_ch_ua = ", ".join(sec_ch_ua_parts)
+    
+    sec_ch_ua_full_version_list_parts = [
+        f'"Google Chrome";v="{full_version}"',
+        f'"Chromium";v="{full_version}"',
+        f'"Not-A.Brand";v="99.0.0.0"',
+    ]
+    sec_ch_ua_full_version_list = ", ".join(sec_ch_ua_full_version_list_parts)
+    
     h = {
         "accept": "application/json",
+        "accept-language": accept_language,
         "user-agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/110.0.0.0 Safari/537.36"
+            f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            f"AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{full_version} Safari/537.36"
         ),
-        "sec-ch-ua": '"Google Chrome";v="110", "Chromium";v="110", "Not_A Brand";v="24"',
+        "sec-ch-ua": sec_ch_ua,
+        "sec-ch-ua-arch": '"x86"',
+        "sec-ch-ua-bitness": '"64"',
+        "sec-ch-ua-full-version": f'"{full_version}"',
+        "sec-ch-ua-full-version-list": sec_ch_ua_full_version_list,
         "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-model": '""',
         "sec-ch-ua-platform": '"Windows"',
+        "sec-ch-ua-platform-version": '"10.0.0"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
         "oai-device-id": did,
     }
     if extra:
@@ -1468,8 +1515,12 @@ def register_account(
     log.info(f"    📝 密码: {openai_password[:4]}****")
 
     oauth_reg = generate_oauth_url()
+    
+    # 随机选择 Chrome 浏览器 profile 和 Accept-Language
+    browser_profile = random.choice(_BROWSER_PROFILES_CHROME)
+    accept_language = _generate_accept_language()
 
-    s_reg = requests.Session(proxies=proxies, impersonate="chrome110")
+    s_reg = requests.Session(proxies=proxies, impersonate=browser_profile)
     s_reg.timeout = 30
 
     try:
@@ -1491,7 +1542,7 @@ def register_account(
         signup_headers = _oai_headers(did, {
             "Referer": "https://auth.openai.com/create-account",
             "content-type": "application/json",
-        })
+        }, browser_profile, accept_language)
         if sentinel_signup:
             signup_headers["openai-sentinel-token"] = sentinel_signup
 
@@ -1518,7 +1569,7 @@ def register_account(
         pwd_headers = _oai_headers(did, {
             "Referer": "https://auth.openai.com/create-account/password",
             "content-type": "application/json",
-        })
+        }, browser_profile, accept_language)
         if sentinel_reg:
             pwd_headers["openai-sentinel-token"] = sentinel_reg
 
@@ -1552,7 +1603,7 @@ def register_account(
                 otp_headers = _oai_headers(did, {
                     "Referer": "https://auth.openai.com/create-account/password",
                     "content-type": "application/json",
-                })
+                }, browser_profile, accept_language)
                 if sentinel_reg:
                     otp_headers["openai-sentinel-token"] = sentinel_reg
 
@@ -1604,7 +1655,7 @@ def register_account(
         val_headers = _oai_headers(did, {
             "Referer": "https://auth.openai.com/email-verification",
             "content-type": "application/json",
-        })
+        }, browser_profile, accept_language)
         if otp_sentinel:
             val_headers["openai-sentinel-token"] = otp_sentinel
 
@@ -1631,7 +1682,7 @@ def register_account(
         create_headers = _oai_headers(did, {
             "Referer": "https://auth.openai.com/about-you",
             "content-type": "application/json",
-        })
+        }, browser_profile, accept_language)
         if sentinel_create:
             create_headers["openai-sentinel-token"] = sentinel_create
 
@@ -1652,7 +1703,7 @@ def register_account(
         time.sleep(wait_time)
 
         log.info(f"    📝 [Step 10] 基础信息建立完毕，执行静默获取 Token...")
-        s_log = requests.Session(proxies=proxies, impersonate="chrome110")
+        s_log = requests.Session(proxies=proxies, impersonate=browser_profile)
         oauth_log = generate_oauth_url()
 
         resp, current_url = _follow_redirect_chain_local(s_log, oauth_log.auth_url, proxies)
@@ -1664,7 +1715,7 @@ def register_account(
         log_start_headers = _oai_headers(s_log.cookies.get("oai-did") or "", {
             "Referer": current_url,
             "content-type": "application/json",
-        })
+        }, browser_profile, accept_language)
         if sentinel_log:
             log_start_headers["openai-sentinel-token"] = sentinel_log
 
@@ -1691,7 +1742,7 @@ def register_account(
         login_pwd_headers = _oai_headers(s_log.cookies.get("oai-did") or "", {
             "Referer": current_url,
             "content-type": "application/json",
-        })
+        }, browser_profile, accept_language)
         if sentinel_pwd:
             login_pwd_headers["openai-sentinel-token"] = sentinel_pwd
 
@@ -1724,7 +1775,7 @@ def register_account(
                             "https://auth.openai.com/api/accounts/email-otp/resend",
                             headers=_oai_headers(s_log.cookies.get("oai-did") or "", {
                                 "Referer": current_url, "content-type": "application/json"
-                            }),
+                            }, browser_profile, accept_language),
                             json_body={}, proxies=proxies, timeout=15,
                         )
                         time.sleep(2)
@@ -1742,7 +1793,7 @@ def register_account(
             val2_headers = _oai_headers(s_log.cookies.get("oai-did") or "", {
                 "Referer": current_url,
                 "content-type": "application/json",
-            })
+            }, browser_profile, accept_language)
             if sentinel_otp2:
                 val2_headers["openai-sentinel-token"] = sentinel_otp2
 
@@ -1775,7 +1826,7 @@ def register_account(
                     "https://auth.openai.com/api/accounts/workspace/select",
                     headers=_oai_headers(s_log.cookies.get("oai-did") or "", {
                         "Referer": current_url, "content-type": "application/json"
-                    }),
+                    }, browser_profile, accept_language),
                     json_body={"workspace_id": str(workspaces2[0].get("id"))},
                     proxies=proxies,
                 )
