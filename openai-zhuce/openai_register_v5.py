@@ -759,27 +759,12 @@ def _prepare_cloudflare_mail_domain(args: Any) -> Optional[str]:
         created_count = _cf_clone_domain_dns(zone_id, clone_source, new_domain, cf_token)
         out(f"新子域 DNS 复制完成: {new_domain} (新建 {created_count} 条)", prefix="[CF]")
 
-        # Determine if we should delete the old first domain
-        should_delete_old_domain = False
-        # Check against args.cf_base_domain first
-        base_suffix = f".{args.cf_base_domain.strip('.').lower()}"
-        if first_domain.lower().endswith(base_suffix):
-            should_delete_old_domain = True
-        # Also check against args.cf_base_domains if available
-        if not should_delete_old_domain and hasattr(args, 'cf_base_domains') and args.cf_base_domains:
-            for base_domain in args.cf_base_domains:
-                check_suffix = f".{base_domain.strip('.').lower()}"
-                if first_domain.lower().endswith(check_suffix):
-                    should_delete_old_domain = True
-                    break
-        
-        if should_delete_old_domain:
-            if first_domain.lower() in set(subdomains):
-                deleted_count = _cf_delete_domain_dns(zone_id, first_domain, cf_token)
-                out(f"已删除被替换旧子域 DNS: {first_domain} ({deleted_count} 条)", prefix="[CF]")
-            updated_domains = [new_domain] + domains[1:]
-        else:
-            updated_domains = [new_domain] + domains
+        # Always delete the old first domain's DNS records if they exist in the current zone
+        if first_domain.lower() in set(subdomains):
+            deleted_count = _cf_delete_domain_dns(zone_id, first_domain, cf_token)
+            out(f"已删除被替换旧子域 DNS: {first_domain} ({deleted_count} 条)", prefix="[CF]")
+        # Replace the first domain in MAIL_DOMAIN
+        updated_domains = [new_domain] + domains[1:]
         updated_mail_domain = ",".join(updated_domains)
         try:
             out("开始更新 Worker MAIL_DOMAIN", prefix="[CF]")
