@@ -27,6 +27,7 @@ function parseArgs() {
     mailfreeDomainIndex: MAILFREE_DOMAIN_INDEX_DEFAULT,
     githubToken: GITHUB_TOKEN,
     gistsId: GISTS_ID,
+    headless: process.env.HEADLESS === 'true',
   };
 
   for (let i = 2; i < process.argv.length; i++) {
@@ -51,6 +52,10 @@ function parseArgs() {
       args.githubToken = process.argv[++i];
     } else if (arg === '--gists-id' && i + 1 < process.argv.length) {
       args.gistsId = process.argv[++i];
+    } else if (arg === '--headless' && i + 1 < process.argv.length) {
+      args.headless = process.argv[++i] === 'true';
+    } else if (arg === '--headless') {
+      args.headless = true;
     }
   }
 
@@ -852,10 +857,11 @@ async function run() {
   console.log('Workers:', workers);
   console.log('Proxy:', proxy);
   console.log('Mail Service:', mailService);
+  console.log('Headless:', headless);
   console.log('===========================');
 
   const browserOptions = {
-    headless: false,
+    headless: headless,
     channel: 'chromium',
   };
   
