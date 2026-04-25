@@ -619,14 +619,14 @@ async function register(browser, args, maxRetries = 1) {
     
   const context = await browser.newContext({
     locale: 'en-US',
-    viewport: { width: 1280, height: 800 },
+    viewport: { width: 1280 + Math.floor(Math.random() * 200), height: 800 + Math.floor(Math.random() * 100) },
     userAgent: getRandomUserAgent(),
     deviceScaleFactor: Math.random() > 0.5 ? 2 : 1,
     isMobile: Math.random() > 0.8,
     hasTouch: Math.random() > 0.8,
-    timezoneId: 'America/New_York',
+    timezoneId: ['America/New_York', 'America/Los_Angeles', 'America/Chicago', 'America/Denver', 'Europe/London', 'Europe/Paris'][Math.floor(Math.random() * 6)],
     permissions: ['geolocation'],
-    geolocation: { latitude: 40.7128 + Math.random() * 10, longitude: -74.0060 + Math.random() * 10 },
+    geolocation: { latitude: 25 + Math.random() * 25, longitude: -120 + Math.random() * 60 },
   });
 
   const page = await context.newPage();
