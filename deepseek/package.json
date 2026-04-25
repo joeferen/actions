@@ -1,0 +1,12 @@
+{
+  "name": "deepseek-register",
+  "version": "1.0.0",
+  "description": "DeepSeek auto register script using Playwright",
+  "main": "register.js",
+  "scripts": {
+    "start": "node register.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  }
+}
