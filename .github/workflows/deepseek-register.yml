@@ -3,18 +3,14 @@ name: DeepSeek Auto Register
 on:
   workflow_dispatch:
     inputs:
-      count:
-        description: 'Number of accounts to register'
+      auto_rerun:
+        description: 'Auto run next after success'
         required: false
-        default: '1'
-      proxy:
-        description: 'Proxy URL'
-        required: false
-        default: ''
-      mailfree_domain_index:
-        description: 'MailFree domain index'
-        required: false
-        default: '2'
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
   repository_dispatch:
     types: [run-deepseek-register]
 
@@ -67,7 +63,7 @@ jobs:
           bash -c "$DEEPSEEK_REG_CMD"
 
       - name: Re-trigger workflow
-        if: steps.register.outcome == 'success'
+        if: steps.register.outcome == 'success' && (github.event.inputs.auto_rerun == 'true' || github.event.inputs.auto_rerun == '')
         uses: peter-evans/repository-dispatch@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
