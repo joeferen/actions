@@ -641,6 +641,7 @@ async function register(browser, args, maxRetries = 1) {
     if (!wafPassed) {
       console.error('WAF verification failed, exiting...');
       await browser.close();
+      console.error(new Error().stack);
       process.exit(1);
     }
 
@@ -652,6 +653,7 @@ async function register(browser, args, maxRetries = 1) {
       if (!wafPassed2) {
         console.error('WAF verification failed after reload, exiting...');
         await browser.close();
+        console.error(new Error().stack);
         process.exit(1);
       }
     }
@@ -678,10 +680,12 @@ async function register(browser, args, maxRetries = 1) {
       const local = randomPrefix();
       const emailInfo = await mailfreeCreateEmail(local, args.mailfreeDomainIndex, args.mailfreeBase, args.mailfreeJwtToken, args.proxy);
       email = emailInfo.address || emailInfo.email;
+      console.log(`Using email: ${email}`);
       inboxToken = null;
     } else {
       const inbox = await createTempMail(randomPrefix(), 5);
       email = inbox.address;
+      console.log(`Using email: ${email}`);
       inboxToken = inbox.token;
     }
     
@@ -747,6 +751,7 @@ async function register(browser, args, maxRetries = 1) {
     
     if (success) {
       saveAccount(email, password);
+      console.log(`Registered: ${email}`);
     }
 
     if (args.mailService === 'mailfree' && email) {
@@ -807,7 +812,11 @@ async function run() {
         console.log(`✅ Success (${successCount}/${count})`);
       } else {
         failCount++;
-        console.log(`❌ Failed (${failCount}/${count})`);
+        if (result.email) {
+          console.log(`❌ Failed: ${result.email}`);
+        } else {
+          console.log(`❌ Failed (${failCount}/${count})`);
+        }
       }
     } catch (e) {
       failCount++;
