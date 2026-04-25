@@ -1,0 +1,89 @@
+name: DeepSeek Auto Register
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: 'Number of accounts to register'
+        required: false
+        default: '1'
+      proxy:
+        description: 'Proxy URL'
+        required: false
+        default: ''
+      mailfree_domain_index:
+        description: 'MailFree domain index'
+        required: false
+        default: '2'
+  repository_dispatch:
+    types: [run-deepseek-register]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          cd deepseek
+          npm install
+
+      - name: Install Playwright browsers
+        run: |
+          cd deepseek
+          npx playwright install chromium
+
+      - name: Run DeepSeek registration
+        id: register
+        timeout-minutes: 60
+        env:
+          DEEPSEEK_REG_CMD: ${{ vars.DEEPSEEK_REG_CMD }}
+          PROXY: ${{ vars.DEEPSEEK_PROXY || '' }}
+          MAILFREE_BASE: ${{ vars.MAILFREE_BASE || 'https://mailfree.smanx.xx.kg' }}
+          MAILFREE_JWT_TOKEN: ${{ vars.MAILFREE_JWT_TOKEN || 'auto' }}
+          MAILFREE_DOMAIN_INDEX: ${{ vars.MAILFREE_DOMAIN_INDEX || '2' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GISTS_ID: ${{ vars.GISTS_ID || '' }}
+        run: |
+          if [ -z "$DEEPSEEK_REG_CMD" ]; then
+            echo "::error::环境变量 DEEPSEEK_REG_CMD 未设置，请联系管理员配置"
+            exit 1
+          fi
+
+          echo "Running: $DEEPSEEK_REG_CMD"
+          cd deepseek
+          bash -c "$DEEPSEEK_REG_CMD"
+
+      - name: Re-trigger workflow
+        if: steps.register.outcome == 'success'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: run-deepseek-register
+        continue-on-error: true
+        id: retrigger
+
+      - name: Wait 1 minute before retry
+        if: steps.retrigger.outcome == 'failure'
+        run: |
+          echo "等待 60 秒后重试..."
+          sleep 60
+
+      - name: Retry re-trigger workflow
+        if: steps.retrigger.outcome == 'failure'
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: run-deepseek-register
