@@ -571,7 +571,9 @@ async function uploadToGists(args) {
       },
       body: uploadData
     });
+    console.log('Uploaded to Gists');
   } catch (e) {
+    console.error('Upload to Gists failed:', e.message);
   }
 }
 
@@ -836,6 +838,8 @@ async function run() {
 
   await browser.close();
 
+  console.log('githubToken:', args.githubToken ? 'set' : 'not set');
+  console.log('gistsId:', args.gistsId ? 'set' : 'not set');
   if (args.githubToken && args.gistsId) {
     await uploadToGists(args);
   }
