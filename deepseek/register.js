@@ -798,11 +798,10 @@ async function run() {
 
   let successCount = 0;
   let failCount = 0;
-  let shouldStop = false;
   const startTime = Date.now();
   const endTime = startTime + duration * 60 * 1000;
 
-  for (let i = 0; i < count && Date.now() < endTime && !shouldStop; i++) {
+  for (let i = 0; i < count && Date.now() < endTime; i++) {
     console.log(`\n=== Registration ${i + 1}/${count} ===`);
     try {
       const result = await register(browser, args);
@@ -816,22 +815,14 @@ async function run() {
         } else {
           console.log(`❌ Failed (${failCount}/${count})`);
         }
-        if (!autoRerun) {
-          console.log('Stopping due to auto_rerun disabled...');
-          shouldStop = true;
-        }
       }
     } catch (e) {
       failCount++;
       console.error('Error:', e.message);
       console.error(e.stack);
-      if (!autoRerun) {
-        console.log('Stopping due to auto_rerun disabled...');
-        shouldStop = true;
-      }
     }
 
-    if (i < count - 1 && Date.now() < endTime && !shouldStop) {
+    if (i < count - 1 && Date.now() < endTime) {
       const wait = 5000 + Math.random() * 5000;
       await new Promise(r => setTimeout(r, wait));
     }
@@ -852,5 +843,4 @@ async function run() {
 run().catch(e => {
   console.error('Fatal error:', e.message);
   console.error(e.stack);
-  process.exit(1);
 });
