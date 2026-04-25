@@ -849,7 +849,7 @@ async function register(browser, args, maxRetries = 1) {
 
 async function run() {
   const args = parseArgs();
-  const { count, duration, workers, proxy, mailService, mailfreeBase, mailfreeJwtToken, mailfreeDomainIndex } = args;
+  const { count, duration, workers, proxy, mailService, mailfreeBase, mailfreeJwtToken, mailfreeDomainIndex, headless } = args;
 
   console.log('=== DeepSeek Auto Register ===');
   console.log('Count:', count);
