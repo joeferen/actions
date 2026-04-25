@@ -543,12 +543,12 @@ async function uploadToGists(args) {
     }
     console.log(`Remote accounts: ${remoteAccounts.length}`);
 
-    const localSet = new Set(localAccounts.map(acc => acc.split('|')[0].trim()));
+    const remoteSet = new Set(remoteAccounts.map(acc => acc.split('|')[0].trim()));
     const mergedAccounts = [...remoteAccounts];
     
     for (const account of localAccounts) {
       const email = account.split('|')[0].trim();
-      if (!localSet.has(email)) {
+      if (!remoteSet.has(email)) {
         mergedAccounts.push(account);
       }
     }
