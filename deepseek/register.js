@@ -843,8 +843,12 @@ async function run() {
 
   console.log('githubToken:', args.githubToken ? 'set' : 'not set');
   console.log('gistsId:', args.gistsId ? 'set' : 'not set');
-  if (args.githubToken && args.gistsId) {
+  console.log('Success count:', successCount);
+  if (args.githubToken && args.gistsId && successCount > 0) {
+    console.log('Uploading to Gists...');
     await uploadToGists(args);
+  } else if (successCount === 0) {
+    console.log('No successful registrations, skipping Gists upload');
   }
 
   console.log('\n========================================');
