@@ -639,10 +639,9 @@ async function register(browser, args, maxRetries = 1) {
 
     const wafPassed = await waitForWaf(page);
     if (!wafPassed) {
-      console.error('WAF verification failed, exiting...');
-      await browser.close();
-      console.error(new Error().stack);
-      process.exit(1);
+      console.error('WAF verification failed, returning failure...');
+      await context.close();
+      return { email: '', password: '', success: false };
     }
 
     let pageText = await page.evaluate(() => document.body.innerText);
@@ -651,10 +650,9 @@ async function register(browser, args, maxRetries = 1) {
       await page.waitForTimeout(15000);
       const wafPassed2 = await waitForWaf(page);
       if (!wafPassed2) {
-        console.error('WAF verification failed after reload, exiting...');
-        await browser.close();
-        console.error(new Error().stack);
-        process.exit(1);
+        console.error('WAF verification failed after reload, returning failure...');
+        await context.close();
+        return { email: '', password: '', success: false };
       }
     }
 
@@ -800,10 +798,11 @@ async function run() {
 
   let successCount = 0;
   let failCount = 0;
+  let shouldStop = false;
   const startTime = Date.now();
   const endTime = startTime + duration * 60 * 1000;
 
-  for (let i = 0; i < count && Date.now() < endTime; i++) {
+  for (let i = 0; i < count && Date.now() < endTime && !shouldStop; i++) {
     console.log(`\n=== Registration ${i + 1}/${count} ===`);
     try {
       const result = await register(browser, args);
@@ -817,14 +816,22 @@ async function run() {
         } else {
           console.log(`❌ Failed (${failCount}/${count})`);
         }
+        if (!autoRerun) {
+          console.log('Stopping due to auto_rerun disabled...');
+          shouldStop = true;
+        }
       }
     } catch (e) {
       failCount++;
       console.error('Error:', e.message);
       console.error(e.stack);
+      if (!autoRerun) {
+        console.log('Stopping due to auto_rerun disabled...');
+        shouldStop = true;
+      }
     }
 
-    if (i < count - 1 && Date.now() < endTime) {
+    if (i < count - 1 && Date.now() < endTime && !shouldStop) {
       const wait = 5000 + Math.random() * 5000;
       await new Promise(r => setTimeout(r, wait));
     }
