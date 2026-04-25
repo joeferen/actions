@@ -779,33 +779,39 @@ async function register(browser, args, maxRetries = 1) {
       await page.waitForTimeout(5000);
 
       console.log('Checking for date of birth dialog...');
+      let dateSelected = false;
       for (let i = 0; i < 10; i++) {
         const dialogText = await page.evaluate(() => document.body.innerText);
         if (dialogText.includes('When were you born') || dialogText.includes('出生')) {
           console.log('Date of birth dialog detected, selecting date...');
           
-          const yearSelect = await page.$('select, [role="combobox"]');
-          if (yearSelect) {
-            await yearSelect.selectOption('2000');
+          try {
+            const yearSelect = await page.$('select, [role="combobox"]');
+            if (yearSelect) {
+              await yearSelect.selectOption('2000');
+            }
+            
+            await page.waitForTimeout(1000);
+            
+            const monthSelects = await page.$$('select, [role="combobox"]');
+            if (monthSelects.length > 1) {
+              await monthSelects[1].selectOption('02');
+            } else if (monthSelects.length === 1) {
+              await monthSelects[0].selectOption('02');
+            }
+            
+            await page.waitForTimeout(1000);
+            
+            const confirmBtn = await page.$('button:has-text("Confirm"), button:has-text("确定"), button:has-text("Next"), button:has-text("Continue")');
+            if (confirmBtn) {
+              await confirmBtn.click({ timeout: 5000 });
+            }
+            
+            console.log('Date selected!');
+            dateSelected = true;
+          } catch (e) {
+            console.log('Date selection failed, but continuing as registration is successful:', e.message);
           }
-          
-          await page.waitForTimeout(1000);
-          
-          const monthSelects = await page.$$('select, [role="combobox"]');
-          if (monthSelects.length > 1) {
-            await monthSelects[1].selectOption('02');
-          } else if (monthSelects.length === 1) {
-            await monthSelects[0].selectOption('02');
-          }
-          
-          await page.waitForTimeout(1000);
-          
-          const confirmBtn = await page.$('button:has-text("Confirm"), button:has-text("确定"), button:has-text("Next"), button:has-text("Continue")');
-          if (confirmBtn) {
-            await confirmBtn.click();
-          }
-          
-          console.log('Date selected!');
           break;
         }
         await page.waitForTimeout(2000);
