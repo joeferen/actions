@@ -521,6 +521,7 @@ async function uploadToGists(args) {
   try {
     const localContent = fs.readFileSync(ACCOUNTS_FILE, 'utf8');
     const localAccounts = localContent.split('\n').filter(line => line.trim());
+    console.log(`Local accounts: ${localAccounts.length}`);
     
     const url = `https://api.github.com/gists/${args.gistsId}`;
     
@@ -540,6 +541,7 @@ async function uploadToGists(args) {
         remoteAccounts = remoteContent.split('\n').filter(line => line.trim());
       }
     }
+    console.log(`Remote accounts: ${remoteAccounts.length}`);
 
     const localSet = new Set(localAccounts.map(acc => acc.split('|')[0].trim()));
     const mergedAccounts = [...remoteAccounts];
@@ -552,7 +554,8 @@ async function uploadToGists(args) {
     }
 
     const mergedContent = mergedAccounts.join('\n') + '\n';
-    
+    console.log(`Merged accounts: ${mergedAccounts.length}`);
+
     const uploadData = JSON.stringify({
       description: 'DeepSeek Accounts',
       files: {
@@ -562,7 +565,7 @@ async function uploadToGists(args) {
       }
     });
 
-    await fetch(url, {
+    const uploadResponse = await fetch(url, {
       method: 'PATCH',
       headers: {
         'Authorization': `token ${args.githubToken}`,
@@ -571,7 +574,12 @@ async function uploadToGists(args) {
       },
       body: uploadData
     });
-    console.log('Uploaded to Gists');
+
+    if (uploadResponse.ok) {
+      console.log(`Uploaded to Gists: ${mergedAccounts.length} accounts`);
+    } else {
+      console.error('Upload failed:', uploadResponse.status, await uploadResponse.text());
+    }
   } catch (e) {
     console.error('Upload to Gists failed:', e.message);
   }
