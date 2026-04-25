@@ -682,7 +682,7 @@ async function register(browser, args, maxRetries = 1) {
       await page.waitForTimeout(2000);
     }
 
-    let email, inboxToken;
+    let inboxToken;
     if (args.mailService === 'mailfree') {
       const domains = await mailfreeGetDomains(args.mailfreeBase, args.mailfreeJwtToken, args.proxy);
       const local = randomPrefix();
@@ -789,11 +789,6 @@ async function run() {
   console.log('=== DeepSeek Auto Register ===');
   console.log(`Count: ${count} | Duration: ${duration}m | Proxy: ${proxy || 'none'} | Headless: ${headless}`);
   console.log('===========================');
-
-  if (args.githubToken && args.gistsId) {
-    console.log('Syncing remote accounts...');
-    await syncRemoteAccounts(args);
-  }
 
   const browserOptions = {
     headless: headless,
