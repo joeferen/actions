@@ -640,10 +640,30 @@ async function register(browser, args, maxRetries = 1) {
   const page = await context.newPage();
 
   try {
-    await page.goto('https://chat.deepseek.com/sign_up', { 
-      waitUntil: 'domcontentloaded',
-      timeout: 180000 
-    });
+    let gotoSuccess = false;
+    for (let retry = 0; retry < 3 && !gotoSuccess; retry++) {
+      try {
+        await page.goto('https://chat.deepseek.com/sign_up', { 
+          waitUntil: 'domcontentloaded',
+          timeout: 180000 
+        });
+        gotoSuccess = true;
+      } catch (e) {
+        if (e.message.includes('net::ERR_CONNECTION_CLOSED') || 
+            e.message.includes('net::ERR_CONNECTION_RESET') ||
+            e.message.includes('net::ERR_CONNECTION_REFUSED')) {
+          console.log(`Connection error, retrying (${retry + 1}/3)...`);
+          await page.waitForTimeout(3000);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    if (!gotoSuccess) {
+      await context.close();
+      return { email: '', password: '', success: false, error: 'Failed to load page after 3 retries' };
+    }
 
     await page.waitForTimeout(20000);
 
@@ -671,7 +691,7 @@ async function register(browser, args, maxRetries = 1) {
         await mailfreeDeleteEmail(email, args.mailfreeBase, args.mailfreeJwtToken, args.proxy);
       }
       await context.close();
-      return { email: '', password: '', success: false };
+      return { email: '', password: '', success: false, error: 'Phone number required', stopAll: true };
     }
 
     for (let i = 0; i < 15; i++) {
@@ -697,7 +717,7 @@ async function register(browser, args, maxRetries = 1) {
       inboxToken = inbox.token;
     }
     
-    const password = email;
+    password = email;
 
     await page.fill('input[placeholder="Email address"]', email);
     await page.waitForTimeout(500);
@@ -772,14 +792,27 @@ async function register(browser, args, maxRetries = 1) {
   } catch (e) {
     console.error('Registration error:', e.message);
     console.error(e.stack);
+    
+    let errorMsg = 'Unknown error';
+    if (e.message.includes('net::ERR_CONNECTION_CLOSED')) {
+      errorMsg = 'Connection closed (network/proxy error)';
+    } else if (e.message.includes('net::ERR_CONNECTION_REFUSED')) {
+      errorMsg = 'Connection refused';
+    } else if (e.message.includes('net::ERR_CONNECTION_RESET')) {
+      errorMsg = 'Connection reset';
+    } else if (e.message.includes('timeout')) {
+      errorMsg = 'Timeout error';
+    } else if (e.message) {
+      errorMsg = e.message.substring(0, 100);
+    }
+    
     if (args.mailService === 'mailfree' && email) {
       await mailfreeDeleteEmail(email, args.mailfreeBase, args.mailfreeJwtToken, args.proxy);
     }
     
     await context.close();
+    return { email: '', password: '', success: false, error: errorMsg };
   }
-  
-  return { email: '', password: '', success: false };
 }
 
 async function run() {
@@ -802,10 +835,11 @@ async function run() {
   let successCount = 0;
   let failCount = 0;
   let wafFailed = false;
+  let stopAll = false;
   const startTime = Date.now();
   const endTime = startTime + duration * 60 * 1000;
 
-  for (let i = 0; i < count && Date.now() < endTime && !wafFailed; i++) {
+  for (let i = 0; i < count && Date.now() < endTime && !wafFailed && !stopAll; i++) {
     console.log(`\n=== Registration ${i + 1}/${count} ===`);
     let browser;
     try {
@@ -818,6 +852,11 @@ async function run() {
         console.log('WAF failed, stopping registration...');
         break;
       }
+      if (result.stopAll) {
+        stopAll = true;
+        console.log('Stopping all registrations...');
+        break;
+      }
       if (result.success) {
         successCount++;
         console.log(`✅ Success (${successCount}/${count})`);
@@ -825,6 +864,8 @@ async function run() {
         failCount++;
         if (result.email) {
           console.log(`❌ Failed: ${result.email}`);
+        } else if (result.error) {
+          console.log(`❌ Failed: ${result.error}`);
         } else {
           console.log(`❌ Failed (${failCount}/${count})`);
         }
