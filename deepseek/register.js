@@ -584,6 +584,7 @@ async function register(browser, args, maxRetries = 1) {
 
     const wafPassed = await waitForWaf(page);
     if (!wafPassed) {
+      console.error('WAF verification failed, exiting...');
       await browser.close();
       process.exit(1);
     }
@@ -594,6 +595,7 @@ async function register(browser, args, maxRetries = 1) {
       await page.waitForTimeout(15000);
       const wafPassed2 = await waitForWaf(page);
       if (!wafPassed2) {
+        console.error('WAF verification failed after reload, exiting...');
         await browser.close();
         process.exit(1);
       }
@@ -700,6 +702,8 @@ async function register(browser, args, maxRetries = 1) {
     return { email, password, success };
     
   } catch (e) {
+    console.error('Registration error:', e.message);
+    console.error(e.stack);
     if (args.mailService === 'mailfree' && email) {
       await mailfreeDeleteEmail(email, args.mailfreeBase, args.mailfreeJwtToken, args.proxy);
     }
@@ -747,7 +751,8 @@ async function run() {
       }
     } catch (e) {
       failCount++;
-      console.log(`❌ Error: ${e.message}`);
+      console.error('Error:', e.message);
+      console.error(e.stack);
     }
 
     if (i < count - 1 && Date.now() < endTime) {
@@ -768,4 +773,8 @@ async function run() {
   console.log(`Accounts file: ${ACCOUNTS_FILE}`);
 }
 
-run().catch(console.error);
+run().catch(e => {
+  console.error('Fatal error:', e.message);
+  console.error(e.stack);
+  process.exit(1);
+});
