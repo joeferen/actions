@@ -796,8 +796,6 @@ async function run() {
     browserOptions.proxy = { server: proxy };
   }
   
-  const browser = await chromium.launch(browserOptions);
-
   let successCount = 0;
   let failCount = 0;
   let wafFailed = false;
@@ -806,8 +804,12 @@ async function run() {
 
   for (let i = 0; i < count && Date.now() < endTime && !wafFailed; i++) {
     console.log(`\n=== Registration ${i + 1}/${count} ===`);
+    let browser;
     try {
+      browser = await chromium.launch(browserOptions);
       const result = await register(browser, args);
+      await browser.close();
+      
       if (result.wafFailed) {
         wafFailed = true;
         console.log('WAF failed, stopping registration...');
@@ -828,6 +830,9 @@ async function run() {
       failCount++;
       console.error('Error:', e.message);
       console.error(e.stack);
+      if (browser) {
+        try { await browser.close(); } catch {}
+      }
     }
 
     if (i < count - 1 && Date.now() < endTime) {
@@ -835,8 +840,6 @@ async function run() {
       await new Promise(r => setTimeout(r, wait));
     }
   }
-
-  await browser.close();
 
   console.log('githubToken:', args.githubToken ? 'set' : 'not set');
   console.log('gistsId:', args.gistsId ? 'set' : 'not set');
