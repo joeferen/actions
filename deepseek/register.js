@@ -390,6 +390,7 @@ async function mailfreeDeleteEmail(mailbox, MAILFREE_BASE, MAILFREE_JWT_TOKEN, P
         'X-Admin-Token': MAILFREE_JWT_TOKEN,
       }
     }, null);
+    console.log(`Deleted email: ${mailbox}`);
     return res;
   } catch (e) {
   }
@@ -457,6 +458,61 @@ async function requestHttps(url, options = {}, proxyUrl = null) {
   return request(reqOptions, options.body, proxyUrl);
 }
 
+async function syncRemoteAccounts(args) {
+  if (!args.githubToken || !args.gistsId) {
+    return;
+  }
+
+  try {
+    const url = `https://api.github.com/gists/${args.gistsId}`;
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `token ${args.githubToken}`,
+        'Accept': 'application/vnd.github.v3+json',
+      }
+    });
+
+    let remoteAccounts = [];
+    if (response.ok) {
+      const gistData = await response.json();
+      if (gistData.files && gistData.files['accounts.txt']) {
+        const remoteContent = gistData.files['accounts.txt'].content;
+        remoteAccounts = remoteContent.split('\n').filter(line => line.trim());
+      }
+    }
+
+    if (remoteAccounts.length === 0) {
+      return;
+    }
+
+    let localContent = '';
+    if (fs.existsSync(ACCOUNTS_FILE)) {
+      localContent = fs.readFileSync(ACCOUNTS_FILE, 'utf8');
+    }
+
+    const localAccounts = localContent.split('\n').filter(line => line.trim());
+    const localSet = new Set(localAccounts.map(acc => acc.split('|')[0].trim()));
+    
+    const uniqueRemote = [];
+    for (const account of remoteAccounts) {
+      const email = account.split('|')[0].trim();
+      if (!localSet.has(email)) {
+        uniqueRemote.push(account);
+      }
+    }
+
+    const mergedAccounts = [...uniqueRemote, ...localAccounts];
+    const mergedContent = mergedAccounts.join('\n') + '\n';
+    fs.writeFileSync(ACCOUNTS_FILE, mergedContent, 'utf8');
+
+    console.log(`Synced ${uniqueRemote.length} remote accounts`);
+  } catch (e) {
+    console.error('Sync error:', e.message);
+  }
+}
+
 async function uploadToGists(args) {
   if (!args.githubToken || !args.gistsId) {
     return;
@@ -496,8 +552,7 @@ async function uploadToGists(args) {
     }
 
     const mergedContent = mergedAccounts.join('\n') + '\n';
-    fs.writeFileSync(ACCOUNTS_FILE, mergedContent, 'utf8');
-
+    
     const uploadData = JSON.stringify({
       description: 'DeepSeek Accounts',
       files: {
@@ -721,6 +776,11 @@ async function run() {
   console.log('=== DeepSeek Auto Register ===');
   console.log(`Count: ${count} | Duration: ${duration}m | Proxy: ${proxy || 'none'} | Headless: ${headless}`);
   console.log('===========================');
+
+  if (args.githubToken && args.gistsId) {
+    console.log('Syncing remote accounts...');
+    await syncRemoteAccounts(args);
+  }
 
   const browserOptions = {
     headless: headless,
