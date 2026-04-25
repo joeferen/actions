@@ -641,7 +641,7 @@ async function register(browser, args, maxRetries = 1) {
     if (!wafPassed) {
       console.error('WAF verification failed, returning failure...');
       await context.close();
-      return { email: '', password: '', success: false };
+      return { email: '', password: '', success: false, wafFailed: true };
     }
 
     let pageText = await page.evaluate(() => document.body.innerText);
@@ -652,7 +652,7 @@ async function register(browser, args, maxRetries = 1) {
       if (!wafPassed2) {
         console.error('WAF verification failed after reload, returning failure...');
         await context.close();
-        return { email: '', password: '', success: false };
+        return { email: '', password: '', success: false, wafFailed: true };
       }
     }
 
@@ -798,13 +798,19 @@ async function run() {
 
   let successCount = 0;
   let failCount = 0;
+  let wafFailed = false;
   const startTime = Date.now();
   const endTime = startTime + duration * 60 * 1000;
 
-  for (let i = 0; i < count && Date.now() < endTime; i++) {
+  for (let i = 0; i < count && Date.now() < endTime && !wafFailed; i++) {
     console.log(`\n=== Registration ${i + 1}/${count} ===`);
     try {
       const result = await register(browser, args);
+      if (result.wafFailed) {
+        wafFailed = true;
+        console.log('WAF failed, stopping registration...');
+        break;
+      }
       if (result.success) {
         successCount++;
         console.log(`✅ Success (${successCount}/${count})`);
